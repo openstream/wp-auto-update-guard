@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.13.1
+ * Version:     1.14.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -126,8 +126,68 @@ add_filter('auto_update_theme', function ($update, $item) {
     $installed = (string) wp_get_theme($slug)->get('Version');
     $new = (string) ($item->new_version ?? '');
     $decision = openstream_auto_update_decide($update, $installed, $new);
+    if ($decision === true && ($addon = openstream_auto_update_addon_blocker($slug)) !== '') {
+        error_log(sprintf('[openstream-auto-updates] theme %s %s -> %s held back: %s', $slug, $installed, $new, $addon));
+        return false;
+    }
     return $decision === true ? openstream_auto_update_risk_ok('theme', $slug, $installed, $new) : $decision;
 }, 20, 2);
+
+/**
+ * Paid add-on plugins that must keep pace with their theme. Updating the theme alone
+ * breaks things (seen with Astra 4.14 + Astra Pro 4.5: empty settings page), so the
+ * theme waits until the add-on can be updated in the same run.
+ * Extend with the filter openstream_auto_update_theme_addons.
+ *
+ * @return array<string, string[]> theme slug (template) => plugin files
+ */
+function openstream_auto_update_theme_addons(): array
+{
+    return (array) apply_filters('openstream_auto_update_theme_addons', [
+        'astra' => ['astra-addon/astra-addon.php'],
+        'generatepress' => ['gp-premium/gp-premium.php'],
+        'kadence' => ['kadence-pro/kadence-pro.php'],
+    ]);
+}
+
+/**
+ * Reason why the theme's add-on cannot be updated in this run ('' = nothing blocks):
+ * its pending update has no download package (missing/expired license) or is vetoed
+ * (WordPress toggle off, excluded, other major version, risk).
+ */
+function openstream_auto_update_addon_blocker(string $theme): string
+{
+    $files = openstream_auto_update_theme_addons()[$theme] ?? [];
+    if ($files === []) {
+        return '';
+    }
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    $plugins = get_plugins();
+    $pending = get_site_transient('update_plugins');
+    $pending = is_object($pending) ? (array) ($pending->response ?? []) : [];
+    $toggles = (array) get_site_option('auto_update_plugins', []);
+    foreach ($files as $file) {
+        if (!isset($plugins[$file]) || !is_plugin_active($file) || !isset($pending[$file])) {
+            continue; // not in use or nothing pending
+        }
+        $u = $pending[$file];
+        $name = $plugins[$file]['Name'] . ' ' . $plugins[$file]['Version'];
+        $slug = (string) ($u->slug ?? dirname($file));
+        $current = (string) $plugins[$file]['Version'];
+        $target = (string) ($u->new_version ?? '');
+        if (empty($u->package)) {
+            return $name . ' cannot be updated to ' . $target . ' (no download package – license missing?)';
+        }
+        if (!in_array($file, $toggles, true) || openstream_auto_update_excluded($slug)
+            || openstream_auto_update_decide(true, $current, $target) !== true
+            || !openstream_auto_update_risk_ok('plugin', $slug, $current, $target)) {
+            return $name . ' -> ' . $target . ' is not updated automatically';
+        }
+    }
+    return '';
+}
 
 /**
  * true if the major version (first number) stays the same and the new version is newer.

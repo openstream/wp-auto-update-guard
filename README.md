@@ -54,6 +54,25 @@ For active plugins and the active theme (and its parent), an update only runs if
 2. the slug is not listed in `OPENSTREAM_AUTO_UPDATE_EXCLUDE`, and
 3. the update risk is acceptable (see below).
 
+### Themes wait for their paid add-on
+
+Some themes come with a paid add-on plugin that must keep pace with the theme (Astra +
+Astra Pro, GeneratePress + GP Premium, Kadence + Kadence Pro). Updating only the theme can
+break things – e.g. Astra 4.14 with Astra Pro 4.5 leaves the Astra settings page empty.
+So a theme update is held back (and logged) while the active add-on has a pending update
+that cannot run in the same pass: no download package (license missing or expired), or
+vetoed by the rules here (toggle off, excluded, other major version, risk). Once the
+add-on can be updated, both go through together.
+
+Further pairs can be added with a filter (theme slug => plugin files):
+
+```php
+add_filter('openstream_auto_update_theme_addons', function (array $map) {
+    $map['my-theme'] = ['my-theme-pro/my-theme-pro.php'];
+    return $map;
+});
+```
+
 ### Update risk
 
 Without further configuration a cautious rule applies: an update may jump at most **one
