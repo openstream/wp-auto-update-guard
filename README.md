@@ -103,9 +103,12 @@ WordPress' own update mails stay as they are, with these optional additions:
   `Guten Tag Frau Muster` or `Hallo Peter`),
 - the form of address in German mails (`OPENSTREAM_AUTO_UPDATE_FORMAL`: `true` = "Sie",
   `false` = "du"). WordPress takes it from the translation: `de_DE` and `de_CH_informal`
-  say "du", `de_DE_formal` and `de_CH` say "Sie". During the update run the plugin switches
-  to the matching variant – installing its core translation on first use – and back
-  afterwards. The site's language setting stays unchanged.
+  say "du", `de_DE_formal` and current `de_CH` say "Sie" (older `de_CH` translations, e.g.
+  WordPress 6.7, still say "du" in the update mails). During the update run the plugin
+  checks the translation actually loaded and, if needed, switches to the next variant that
+  uses the wanted form (`de_CH` → `de_DE_formal`, `de_DE` → `de_DE_formal`, …) – installing
+  its core translation on first use – and back afterwards. The site's language setting
+  stays unchanged.
 - your own contact instead of the WordPress.org support hint (`OPENSTREAM_AUTO_UPDATE_CONTACT`,
   `OPENSTREAM_AUTO_UPDATE_TEAM`; German or English depending on the site locale, German in
   the same form of address),

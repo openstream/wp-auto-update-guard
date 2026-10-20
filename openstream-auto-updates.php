@@ -3,8 +3,8 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.13.0
- * Author:      openstream
+ * Version:     1.13.1
+ * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
  *
@@ -326,8 +326,9 @@ function openstream_auto_update_mail_greeting(string $body): string
 //
 // WordPress translates the mails with the locale of the admin user (or the site). The form
 // of address comes from that translation: de_DE and de_CH_informal say "du", de_DE_formal
-// and de_CH say "Sie". With OPENSTREAM_AUTO_UPDATE_FORMAL the run switches to the matching
-// variant (installed on demand) and back afterwards. Without the constant nothing changes.
+// and (current) de_CH say "Sie". With OPENSTREAM_AUTO_UPDATE_FORMAL the run checks the
+// translation actually loaded and, if it uses the other form, switches to the next variant
+// that does (installed on demand) – and back afterwards. Without the constant nothing changes.
 
 add_action('wp_maybe_auto_update', 'openstream_auto_update_switch_locale', -1);
 add_action('wp_maybe_auto_update', 'openstream_auto_update_restore_locale', 100);
@@ -346,19 +347,31 @@ function openstream_auto_update_locale_is_formal(string $locale): bool
     return substr($locale, -7) === '_formal' || $locale === 'de_CH';
 }
 
-/** Locale variant with the wanted form of address, or the locale itself. */
-function openstream_auto_update_variant(string $locale): string
+/**
+ * Locales to try for the wanted form of address, in order. The current locale comes
+ * first: its translation may already be right (or wrong – older de_CH translations
+ * say "du" in the update mails although de_CH is formal today).
+ *
+ * @return string[]
+ */
+function openstream_auto_update_candidates(string $locale, bool $formal): array
 {
-    $formal = openstream_auto_update_formal();
-    if ($formal === null || $locale === '' || strpos($locale, 'de') !== 0
-        || openstream_auto_update_locale_is_formal($locale) === $formal) {
-        return $locale;
-    }
     $base = (string) preg_replace('/_(in)?formal$/', '', $locale);
     if ($base === 'de_CH') {
-        return $formal ? 'de_CH' : 'de_CH_informal';
+        $list = $formal ? ['de_CH', 'de_DE_formal'] : ['de_CH_informal', 'de_DE'];
+    } else {
+        $list = [$formal ? $base . '_formal' : $base];
     }
-    return $formal ? $base . '_formal' : $base;
+    return array_values(array_unique(array_merge([$locale], $list)));
+}
+
+/** Does the currently loaded translation of the update mail use the wanted form of address? */
+function openstream_auto_update_translation_matches(bool $formal): bool
+{
+    $text = __('Howdy! Some plugins have automatically updated to their latest versions on your site at %s. No further action is needed on your part.');
+    return (bool) ($formal
+        ? preg_match('/\b(Ihre|Ihrer|Ihrerseits|Ihnen)\b/u', $text)
+        : preg_match('/\b(deine|deiner|deinerseits|dir|du)\b/u', $text));
 }
 
 /** Make sure the core translation of $locale is installed (downloads it if needed). */
@@ -377,40 +390,58 @@ function openstream_auto_update_ensure_language(string $locale): bool
     remove_filter('file_mod_allowed', $allow, 20);
     if (!$ok) {
         error_log('[openstream-auto-updates] translation ' . $locale . ' not available – form of address unchanged');
+        return false;
     }
-    return $ok;
+    // The locale switcher only knows the languages installed at startup – renew it so it
+    // can switch to the one just downloaded.
+    if (class_exists('WP_Locale_Switcher') && !is_locale_switched()) {
+        $GLOBALS['wp_locale_switcher'] = new WP_Locale_Switcher();
+        $GLOBALS['wp_locale_switcher']->init();
+    }
+    return true;
 }
 
-/** The admin's user locale (used by WordPress for the mails) mapped to the variant. */
+/** The admin's user locale (used by WordPress for the mails) replaced by the chosen locale. */
 function openstream_auto_update_user_locale_filter($value, $object_id, $meta_key, $single)
 {
-    if ($meta_key !== 'locale') {
+    $chosen = (string) ($GLOBALS['openstream_auto_update_locale'] ?? '');
+    if ($meta_key !== 'locale' || $chosen === '') {
         return $value;
     }
-    remove_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10);
-    $locale = (string) get_user_meta((int) $object_id, 'locale', true);
-    add_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10, 4);
-    if ($locale === '') {
-        return $value; // no user locale -> site locale, already switched
-    }
-    $variant = openstream_auto_update_variant($locale);
-    if ($variant === $locale || !openstream_auto_update_ensure_language($variant)) {
-        return $value;
-    }
-    return $single ? $variant : [$variant];
+    return $single ? $chosen : [$chosen];
 }
 
 function openstream_auto_update_switch_locale(): void
 {
-    if (openstream_auto_update_formal() === null) {
+    $formal = openstream_auto_update_formal();
+    $locale = (string) get_locale();
+    if ($formal === null || strpos($locale, 'de') !== 0) {
         return;
     }
-    $locale = (string) get_locale();
-    $variant = openstream_auto_update_variant($locale);
-    if ($variant !== $locale && openstream_auto_update_ensure_language($variant) && switch_to_locale($variant)) {
-        $GLOBALS['openstream_auto_update_switched'] = true;
+    foreach (openstream_auto_update_candidates($locale, $formal) as $candidate) {
+        $switched = false;
+        if ($candidate !== $locale) {
+            if (!openstream_auto_update_ensure_language($candidate) || !switch_to_locale($candidate)) {
+                continue;
+            }
+            $switched = true;
+        }
+        // WordPress < 6.8 does not load the admin translations (which hold the update mail
+        // texts) during the update run after a locale switch.
+        if (is_readable(WP_LANG_DIR . '/admin-' . $candidate . '.mo')) {
+            load_textdomain('default', WP_LANG_DIR . '/admin-' . $candidate . '.mo', $candidate);
+        }
+        if (openstream_auto_update_translation_matches($formal)) {
+            $GLOBALS['openstream_auto_update_locale'] = $candidate;
+            $GLOBALS['openstream_auto_update_switched'] = $switched;
+            add_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10, 4);
+            return;
+        }
+        if ($switched) {
+            restore_previous_locale();
+        }
     }
-    add_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10, 4);
+    error_log('[openstream-auto-updates] no translation with the wanted form of address found – mails as translated');
 }
 
 function openstream_auto_update_restore_locale(): void
@@ -418,8 +449,8 @@ function openstream_auto_update_restore_locale(): void
     remove_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10);
     if (!empty($GLOBALS['openstream_auto_update_switched'])) {
         restore_previous_locale();
-        unset($GLOBALS['openstream_auto_update_switched']);
     }
+    unset($GLOBALS['openstream_auto_update_switched'], $GLOBALS['openstream_auto_update_locale']);
 }
 
 // WordPress does NOT send the plugin/theme mail when core was updated in the same run
