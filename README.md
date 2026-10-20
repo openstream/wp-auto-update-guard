@@ -1,4 +1,4 @@
-# Auto-Update Guard
+# Openstream Auto-Update Guard
 
 A WordPress must-use plugin that keeps sites up to date automatically – without the
 risky part. It turns WordPress' built-in auto-updater on, then vetoes every update
@@ -11,8 +11,6 @@ that is likely to break a site.
 - **Works in Git checkouts:** WordPress normally disables auto-updates silently as soon as
   it finds a `.git` directory. This plugin lifts that block and can commit and push every
   update straight from production.
-
-Built and used by [openstream](https://www.openstream.ch) on client sites.
 
 ## Requirements
 
@@ -101,8 +99,16 @@ HTML that references files of the old version.
 WordPress' own update mails stay as they are, with these optional additions:
 
 - copies to `OPENSTREAM_AUTO_UPDATE_EMAIL` and `OPENSTREAM_AUTO_UPDATE_NOTIFY`,
+- your own greeting instead of "Howdy!" (`OPENSTREAM_AUTO_UPDATE_GREETING`, e.g.
+  `Guten Tag Frau Muster` or `Hallo Peter`),
+- the form of address in German mails (`OPENSTREAM_AUTO_UPDATE_FORMAL`: `true` = "Sie",
+  `false` = "du"). WordPress takes it from the translation: `de_DE` and `de_CH_informal`
+  say "du", `de_DE_formal` and `de_CH` say "Sie". During the update run the plugin switches
+  to the matching variant – installing its core translation on first use – and back
+  afterwards. The site's language setting stays unchanged.
 - your own contact instead of the WordPress.org support hint (`OPENSTREAM_AUTO_UPDATE_CONTACT`,
-  `OPENSTREAM_AUTO_UPDATE_TEAM`; German or English depending on the site locale),
+  `OPENSTREAM_AUTO_UPDATE_TEAM`; German or English depending on the site locale, German in
+  the same form of address),
 - the plugin/theme mail is also sent when core was updated in the same run (WordPress
   skips it in that case).
 
@@ -136,6 +142,8 @@ All constants are optional and go into `wp-config.php`:
 | `OPENSTREAM_AUTO_UPDATE_NOTIFY` | – | Further recipients of the update mails (comma list) |
 | `OPENSTREAM_AUTO_UPDATE_CONTACT` | – | Contact (e.g. e-mail address) replacing the WordPress.org support hint |
 | `OPENSTREAM_AUTO_UPDATE_TEAM` | – | Signature replacing "The WordPress Team" (only with `…_CONTACT`) |
+| `OPENSTREAM_AUTO_UPDATE_GREETING` | – | Greeting replacing "Howdy!" at the start of the update mails |
+| `OPENSTREAM_AUTO_UPDATE_FORMAL` | as translated | German mails: `true` = "Sie", `false` = "du" |
 | `OPENSTREAM_AUTO_UPDATE_MAX_RISK` | `medium` | Highest risk level installed automatically: `low` or `medium` |
 | `OPENSTREAM_DASHBOARD_URL` | openstream's service | Base URL of the risk API |
 | `OPENSTREAM_DASHBOARD_TOKEN` | – | Token for the risk API; without it the cautious rule applies |
@@ -148,6 +156,8 @@ define('OPENSTREAM_AUTO_UPDATE_TICKET', 'PROJ-123');
 define('OPENSTREAM_AUTO_UPDATE_EMAIL', 'ops@example.com');
 define('OPENSTREAM_AUTO_UPDATE_CONTACT', 'support@example.com');
 define('OPENSTREAM_AUTO_UPDATE_TEAM', 'Example Agency');
+define('OPENSTREAM_AUTO_UPDATE_GREETING', 'Guten Tag Frau Muster');
+define('OPENSTREAM_AUTO_UPDATE_FORMAL', true);
 define('OPENSTREAM_AUTO_UPDATE_EXCLUDE', 'woocommerce-subscriptions');
 ```
 
@@ -157,6 +167,9 @@ Held-back updates, risk API problems, cache flushes and Git errors are written t
 error log with the prefix `[openstream-auto-updates]`.
 
 ## Notes
+
+- `OPENSTREAM_AUTO_UPDATE_ANY_ENV` really runs updates wherever WP-Cron fires – on a local
+  copy too. Use it on a disposable copy only.
 
 - Hosting tools that update on their own (e.g. Plesk WP Toolkit's "smart updates") bypass
   this plugin's veto. Detach the site there if the guard should be in charge.

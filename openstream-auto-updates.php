@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: Auto-Update Guard
+ * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.12.0
+ * Version:     1.13.0
  * Author:      openstream
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -18,6 +18,8 @@
  *   define('OPENSTREAM_AUTO_UPDATE_NOTIFY', 'client@example.com'); // further recipients of the update mails (comma list)
  *   define('OPENSTREAM_AUTO_UPDATE_CONTACT', 'support@example.com'); // replaces the WordPress.org support hint in update mails
  *   define('OPENSTREAM_AUTO_UPDATE_TEAM', 'Example Agency');       // replaces "The WordPress Team" signature
+ *   define('OPENSTREAM_AUTO_UPDATE_GREETING', 'Guten Tag Frau Muster'); // replaces "Howdy!" at the start of update mails
+ *   define('OPENSTREAM_AUTO_UPDATE_FORMAL', true);                 // German mails: true = "Sie", false = "du"
  *   define('OPENSTREAM_AUTO_UPDATE_ANY_ENV', true);                // also run outside production (testing)
  *   define('OPENSTREAM_DASHBOARD_URL', 'https://dashboard.example.com'); // risk API (see README)
  *   define('OPENSTREAM_DASHBOARD_TOKEN', '…');                     // token for the risk API
@@ -266,7 +268,7 @@ foreach (['auto_core_update_email', 'auto_plugin_theme_update_email', 'automatic
             $to = array_merge($to, array_filter(array_map('trim', explode(',', (string) OPENSTREAM_AUTO_UPDATE_NOTIFY)), 'is_email'));
         }
         $email['to'] = array_values(array_unique($to));
-        $email['body'] = openstream_auto_update_mail_footer((string) ($email['body'] ?? ''));
+        $email['body'] = openstream_auto_update_mail_footer(openstream_auto_update_mail_greeting((string) ($email['body'] ?? '')));
         return $email;
     }, 99);
 }
@@ -290,14 +292,134 @@ function openstream_auto_update_mail_footer(string $body): string
         return !preg_match('~https?://([a-z-]+\.)?wordpress\.org/support~i', $t)
             && !preg_match('/^(Das WordPress-Team|The WordPress Team|L.équipe WordPress|Il team di WordPress)\.?$/iu', $t);
     });
-    $german = strpos((string) get_locale(), 'de') === 0;
-    $keep[] = $german
-        ? 'Bei Fragen oder falls Ihnen nach dem Update etwas auffällt, melden Sie sich bitte bei uns: ' . $contact
-        : 'If you have any questions or notice anything after the update, please contact us: ' . $contact;
+    $locale = (string) get_locale();
+    $german = strpos($locale, 'de') === 0;
+    if (!$german) {
+        $keep[] = 'If you have any questions or notice anything after the update, please contact us: ' . $contact;
+    } elseif (openstream_auto_update_formal() ?? openstream_auto_update_locale_is_formal($locale)) {
+        $keep[] = 'Bei Fragen oder falls Ihnen nach dem Update etwas auffällt, melden Sie sich bitte bei uns: ' . $contact;
+    } else {
+        $keep[] = 'Bei Fragen oder falls dir nach dem Update etwas auffällt, melde dich bitte bei uns: ' . $contact;
+    }
     if ($team !== '') {
         $keep[] = $german ? 'Das Team von ' . $team : 'The ' . $team . ' team';
     }
     return implode("\n\n", $keep) . "\n";
+}
+
+/**
+ * Replace the leading "Howdy!" (translated: "Hallo!", "Bonjour !" …) with
+ * OPENSTREAM_AUTO_UPDATE_GREETING, followed by an empty line.
+ */
+function openstream_auto_update_mail_greeting(string $body): string
+{
+    $greeting = defined('OPENSTREAM_AUTO_UPDATE_GREETING') ? trim((string) OPENSTREAM_AUTO_UPDATE_GREETING) : '';
+    if ($greeting === '') {
+        return $body;
+    }
+    return (string) preg_replace('/^\s*\p{L}+(?: \p{L}+)?\s?!\s*/u', $greeting . "\n\n", $body, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Du/Sie: German update mails in the wanted form of address
+// ---------------------------------------------------------------------------
+//
+// WordPress translates the mails with the locale of the admin user (or the site). The form
+// of address comes from that translation: de_DE and de_CH_informal say "du", de_DE_formal
+// and de_CH say "Sie". With OPENSTREAM_AUTO_UPDATE_FORMAL the run switches to the matching
+// variant (installed on demand) and back afterwards. Without the constant nothing changes.
+
+add_action('wp_maybe_auto_update', 'openstream_auto_update_switch_locale', -1);
+add_action('wp_maybe_auto_update', 'openstream_auto_update_restore_locale', 100);
+
+/** true = "Sie", false = "du", null = as translated. */
+function openstream_auto_update_formal(): ?bool
+{
+    return defined('OPENSTREAM_AUTO_UPDATE_FORMAL') ? (bool) OPENSTREAM_AUTO_UPDATE_FORMAL : null;
+}
+
+function openstream_auto_update_locale_is_formal(string $locale): bool
+{
+    if (substr($locale, -9) === '_informal') {
+        return false;
+    }
+    return substr($locale, -7) === '_formal' || $locale === 'de_CH';
+}
+
+/** Locale variant with the wanted form of address, or the locale itself. */
+function openstream_auto_update_variant(string $locale): string
+{
+    $formal = openstream_auto_update_formal();
+    if ($formal === null || $locale === '' || strpos($locale, 'de') !== 0
+        || openstream_auto_update_locale_is_formal($locale) === $formal) {
+        return $locale;
+    }
+    $base = (string) preg_replace('/_(in)?formal$/', '', $locale);
+    if ($base === 'de_CH') {
+        return $formal ? 'de_CH' : 'de_CH_informal';
+    }
+    return $formal ? $base . '_formal' : $base;
+}
+
+/** Make sure the core translation of $locale is installed (downloads it if needed). */
+function openstream_auto_update_ensure_language(string $locale): bool
+{
+    if (in_array($locale, get_available_languages(), true)) {
+        return true;
+    }
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+    require_once ABSPATH . 'wp-admin/includes/translation-install.php';
+    $allow = static function ($allowed, $context) {
+        return $context === 'download_language_pack' ? true : $allowed;
+    };
+    add_filter('file_mod_allowed', $allow, 20, 2);
+    $ok = (bool) wp_download_language_pack($locale);
+    remove_filter('file_mod_allowed', $allow, 20);
+    if (!$ok) {
+        error_log('[openstream-auto-updates] translation ' . $locale . ' not available – form of address unchanged');
+    }
+    return $ok;
+}
+
+/** The admin's user locale (used by WordPress for the mails) mapped to the variant. */
+function openstream_auto_update_user_locale_filter($value, $object_id, $meta_key, $single)
+{
+    if ($meta_key !== 'locale') {
+        return $value;
+    }
+    remove_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10);
+    $locale = (string) get_user_meta((int) $object_id, 'locale', true);
+    add_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10, 4);
+    if ($locale === '') {
+        return $value; // no user locale -> site locale, already switched
+    }
+    $variant = openstream_auto_update_variant($locale);
+    if ($variant === $locale || !openstream_auto_update_ensure_language($variant)) {
+        return $value;
+    }
+    return $single ? $variant : [$variant];
+}
+
+function openstream_auto_update_switch_locale(): void
+{
+    if (openstream_auto_update_formal() === null) {
+        return;
+    }
+    $locale = (string) get_locale();
+    $variant = openstream_auto_update_variant($locale);
+    if ($variant !== $locale && openstream_auto_update_ensure_language($variant) && switch_to_locale($variant)) {
+        $GLOBALS['openstream_auto_update_switched'] = true;
+    }
+    add_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10, 4);
+}
+
+function openstream_auto_update_restore_locale(): void
+{
+    remove_filter('get_user_metadata', 'openstream_auto_update_user_locale_filter', 10);
+    if (!empty($GLOBALS['openstream_auto_update_switched'])) {
+        restore_previous_locale();
+        unset($GLOBALS['openstream_auto_update_switched']);
+    }
 }
 
 // WordPress does NOT send the plugin/theme mail when core was updated in the same run
