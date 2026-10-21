@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.14.0
+ * Version:     1.15.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -24,6 +24,7 @@
  *   define('OPENSTREAM_DASHBOARD_URL', 'https://dashboard.example.com'); // risk API (see README)
  *   define('OPENSTREAM_DASHBOARD_TOKEN', '…');                     // token for the risk API
  *   define('OPENSTREAM_AUTO_UPDATE_MAX_RISK', 'medium');           // highest risk installed automatically: low|medium
+ *   define('OPENSTREAM_AUTO_UPDATE_GOODLAYERS', 'goodlayers-core,goodlayers-core-portfolio'); // GoodLayers theme plugins as regular updates (true = all)
  */
 
 defined('ABSPATH') || exit;
@@ -143,12 +144,149 @@ add_filter('auto_update_theme', function ($update, $item) {
  */
 function openstream_auto_update_theme_addons(): array
 {
-    return (array) apply_filters('openstream_auto_update_theme_addons', [
+    $map = [
         'astra' => ['astra-addon/astra-addon.php'],
         'generatepress' => ['gp-premium/gp-premium.php'],
         'kadence' => ['kadence-pro/kadence-pro.php'],
-    ]);
+    ];
+    if (openstream_auto_update_goodlayers_plugins() !== []) {
+        $map[get_template()] = ['goodlayers-core/goodlayers-core.php'];
+    }
+    return (array) apply_filters('openstream_auto_update_theme_addons', $map);
 }
+
+// ---------------------------------------------------------------------------
+// GoodLayers: plugins the theme only offers on its own "Install Plugins" page
+//
+// GoodLayers themes (OnePagePro, Infinite, Kingster …) download goodlayers-core,
+// -portfolio, revslider etc. from goodlayers.com once the theme is registered, but only
+// show them on their TGMPA page – WordPress' update system never sees them. With
+// OPENSTREAM_AUTO_UPDATE_GOODLAYERS they are announced as regular plugin updates.
+// The theme loads its registration code in the admin only, so the package URL is
+// rebuilt here (and remembered from admin requests for Freemius-registered sites).
+// ---------------------------------------------------------------------------
+
+/**
+ * Plugin slugs to fetch from GoodLayers: comma list, or true for every installed plugin
+ * the vendor's version list knows.
+ *
+ * @return string[]|true
+ */
+function openstream_auto_update_goodlayers_plugins()
+{
+    if (!defined('OPENSTREAM_AUTO_UPDATE_GOODLAYERS') || !OPENSTREAM_AUTO_UPDATE_GOODLAYERS) {
+        return [];
+    }
+    if (OPENSTREAM_AUTO_UPDATE_GOODLAYERS === true) {
+        return true;
+    }
+    return array_values(array_filter(array_map('trim', explode(',', (string) OPENSTREAM_AUTO_UPDATE_GOODLAYERS))));
+}
+
+/** Download URL of a GoodLayers plugin ('' = theme not registered). */
+function openstream_auto_update_goodlayers_package(string $theme, string $slug): string
+{
+    $cache = (array) get_site_option('openstream_auto_update_goodlayers_packages', []);
+
+    // Admin request: the theme's own function knows both registration types (purchase code, Freemius).
+    $fn = str_replace('-', '_', $theme) . '_get_download_url';
+    if (function_exists($fn)) {
+        $url = (string) $fn($slug);
+        if (($cache[$slug] ?? '') !== $url) {
+            $cache[$slug] = $url;
+            update_site_option('openstream_auto_update_goodlayers_packages', $cache);
+        }
+        return $url;
+    }
+
+    // Cron: same URL as the theme builds it from the ThemeForest registration.
+    $key = (string) get_option($theme . '_download_key', '');
+    $code = '';
+    $verification = get_template_directory() . '/admin/installer/verification.php';
+    if (is_readable($verification) && preg_match("/_ITEM_ID'\\s*,\\s*(\\d+)/", (string) file_get_contents($verification), $m)) {
+        $code = (string) get_option('envato_purchase_code_' . $m[1], '');
+    }
+    if ($key !== '' && $code !== '') {
+        return add_query_arg([
+            'purchase_code' => urlencode($code),
+            'download_key' => $key,
+            'file' => $slug,
+        ], 'https://goodlayers.com/licenses/wp-content/plugins/goodlayers-verification/download/');
+    }
+    return $key !== '' ? (string) ($cache[$slug] ?? '') : '';
+}
+
+/**
+ * Latest versions offered by GoodLayers (slug => version). The theme refreshes its list
+ * on admin visits only; refreshed here every 12 hours.
+ *
+ * @return array<string, string>
+ */
+function openstream_auto_update_goodlayers_versions(string $theme): array
+{
+    $list = get_option($theme . '-plugins-version', []);
+    if (get_site_transient('openstream_auto_update_goodlayers_checked') === false) {
+        set_site_transient('openstream_auto_update_goodlayers_checked', 1, 12 * HOUR_IN_SECONDS);
+        $res = wp_remote_get('https://goodlayers.com/licenses/wp-json/version/plugin', ['timeout' => 15]);
+        $fresh = is_wp_error($res) || wp_remote_retrieve_response_code($res) !== 200
+            ? null : json_decode((string) wp_remote_retrieve_body($res), true);
+        if (is_array($fresh) && $fresh !== []) {
+            update_option($theme . '-plugins-version', $fresh);
+            $list = $fresh;
+        } else {
+            error_log('[openstream-auto-updates] GoodLayers version list not available – using the stored one');
+        }
+    }
+    $out = [];
+    foreach ((array) $list as $slug => $info) {
+        if (!empty($info['version'])) {
+            $out[(string) $slug] = (string) $info['version'];
+        }
+    }
+    return $out;
+}
+
+add_filter('pre_set_site_transient_update_plugins', function ($transient) {
+    $wanted = openstream_auto_update_goodlayers_plugins();
+    if ($wanted === [] || !is_object($transient)) {
+        return $transient;
+    }
+    $theme = get_template();
+    $versions = openstream_auto_update_goodlayers_versions($theme);
+    if ($versions === []) {
+        return $transient; // not a GoodLayers theme
+    }
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    foreach (get_plugins() as $file => $data) {
+        $slug = dirname($file);
+        if (!isset($versions[$slug]) || ($wanted !== true && !in_array($slug, $wanted, true))) {
+            continue;
+        }
+        $package = openstream_auto_update_goodlayers_package($theme, $slug);
+        if ($package === '') {
+            continue; // not registered: leave it to the theme's own page
+        }
+        $item = (object) [
+            'id' => 'goodlayers.com/' . $slug,
+            'slug' => $slug,
+            'plugin' => $file,
+            'new_version' => $versions[$slug],
+            'url' => 'https://goodlayers.com',
+            'package' => $package,
+        ];
+        // Listed in no_update as well, otherwise WordPress shows no auto-update toggle.
+        if (version_compare($versions[$slug], (string) $data['Version'], '>')) {
+            $transient->response[$file] = $item;
+            unset($transient->no_update[$file]);
+        } else {
+            $transient->no_update[$file] = $item;
+            unset($transient->response[$file]);
+        }
+    }
+    return $transient;
+});
 
 /**
  * Reason why the theme's add-on cannot be updated in this run ('' = nothing blocks):

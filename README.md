@@ -73,6 +73,26 @@ add_filter('openstream_auto_update_theme_addons', function (array $map) {
 });
 ```
 
+### GoodLayers theme plugins
+
+GoodLayers themes (OnePagePro, Infinite, Kingster …) need goodlayers-core, -portfolio,
+Revolution Slider etc. They are not in the theme package: once the theme is registered
+(ThemeForest purchase code or GoodLayers license), the theme downloads them from
+goodlayers.com – but only offers them on its own "Install Plugins" page. WordPress' update
+system, WP-CLI and auto-updates never see them.
+
+`OPENSTREAM_AUTO_UPDATE_GOODLAYERS` announces them as regular plugin updates, with the same
+download URL the theme uses. The vendor's version list is refreshed every 12 hours (the
+theme does that on admin visits only). The usual rules apply (same major version, risk),
+and the theme waits for goodlayers-core like for any other paid add-on. Without
+registration nothing changes.
+
+```php
+define('OPENSTREAM_AUTO_UPDATE_GOODLAYERS', 'goodlayers-core,goodlayers-core-portfolio');
+// or every GoodLayers plugin installed on the site:
+define('OPENSTREAM_AUTO_UPDATE_GOODLAYERS', true);
+```
+
 ### Update risk
 
 Without further configuration a cautious rule applies: an update may jump at most **one
@@ -167,6 +187,7 @@ All constants are optional and go into `wp-config.php`:
 | `OPENSTREAM_AUTO_UPDATE_GREETING` | – | Greeting replacing "Howdy!" at the start of the update mails |
 | `OPENSTREAM_AUTO_UPDATE_FORMAL` | as translated | German mails: `true` = "Sie", `false` = "du" |
 | `OPENSTREAM_AUTO_UPDATE_MAX_RISK` | `medium` | Highest risk level installed automatically: `low` or `medium` |
+| `OPENSTREAM_AUTO_UPDATE_GOODLAYERS` | – | GoodLayers theme plugins as regular updates: comma list of slugs or `true` for all |
 | `OPENSTREAM_DASHBOARD_URL` | openstream's service | Base URL of the risk API |
 | `OPENSTREAM_DASHBOARD_TOKEN` | – | Token for the risk API; without it the cautious rule applies |
 | `OPENSTREAM_AUTO_UPDATE_ANY_ENV` | `false` | Also run outside production (testing only) |
