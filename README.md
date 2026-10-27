@@ -138,6 +138,9 @@ HTML that references files of the old version.
 WordPress' own update mails stay as they are, with these optional additions:
 
 - copies to `OPENSTREAM_AUTO_UPDATE_EMAIL` and `OPENSTREAM_AUTO_UPDATE_NOTIFY`,
+- no mails to the site admin address (`OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN` = `false`):
+  only `…_EMAIL`/`…_NOTIFY` receive them – e.g. the agency instead of the client, who can
+  get a monthly report from the update log instead. With no recipient left, no mail is sent,
 - your own greeting instead of "Howdy!" (`OPENSTREAM_AUTO_UPDATE_GREETING`, e.g.
   `Guten Tag Frau Muster` or `Hallo Peter`),
 - the form of address in German mails (`OPENSTREAM_AUTO_UPDATE_FORMAL`: `true` = "Sie",
@@ -182,6 +185,7 @@ All constants are optional and go into `wp-config.php`:
 | `OPENSTREAM_AUTO_UPDATE_TICKET` | – | Enables commit + push; used as commit message prefix (e.g. a Jira key) |
 | `OPENSTREAM_AUTO_UPDATE_EMAIL` | – | Copy of all update mails, recipient of Git error mails |
 | `OPENSTREAM_AUTO_UPDATE_NOTIFY` | – | Further recipients of the update mails (comma list) |
+| `OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN` | `true` | `false` = no update mails to the site admin address |
 | `OPENSTREAM_AUTO_UPDATE_CONTACT` | – | Contact (e.g. e-mail address) replacing the WordPress.org support hint |
 | `OPENSTREAM_AUTO_UPDATE_TEAM` | – | Signature replacing "The WordPress Team" (only with `…_CONTACT`) |
 | `OPENSTREAM_AUTO_UPDATE_GREETING` | – | Greeting replacing "Howdy!" at the start of the update mails |
@@ -205,6 +209,27 @@ define('OPENSTREAM_AUTO_UPDATE_EXCLUDE', 'woocommerce-subscriptions');
 ```
 
 ## Logging
+
+### Update log
+
+Every run that changed something appends one entry per component to the site option
+`openstream_auto_update_log` (not autoloaded; entries older than 400 days are dropped):
+
+```json
+{"time": "2026-10-27T10:45:59+00:00", "followup": false, "commit": "b5ab3ad", "git_error": null,
+ "type": "plugin", "slug": "contact-form-7", "name": "Contact Form 7",
+ "from": "6.1.1", "to": "6.1.2", "result": "updated"}
+```
+
+`result` is `updated` or `failed` (then with `error`); `commit` is the commit made by the
+run (see above). Translations are summarised in one entry per run (`slug` = languages).
+Read it for reports with
+
+```bash
+wp option get openstream_auto_update_log --format=json
+```
+
+### PHP error log
 
 Held-back updates, risk API problems, cache flushes and Git errors are written to the PHP
 error log with the prefix `[openstream-auto-updates]`.

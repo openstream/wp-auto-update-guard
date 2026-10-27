@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.15.0
+ * Version:     1.16.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -16,6 +16,7 @@
  *   define('OPENSTREAM_AUTO_UPDATE_TICKET', 'PROJ-123');           // commit + push updates with this ticket prefix
  *   define('OPENSTREAM_AUTO_UPDATE_EMAIL', 'ops@example.com');     // copy of all update mails + Git error mails
  *   define('OPENSTREAM_AUTO_UPDATE_NOTIFY', 'client@example.com'); // further recipients of the update mails (comma list)
+ *   define('OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN', false);          // no update mails to the site admin address (default true)
  *   define('OPENSTREAM_AUTO_UPDATE_CONTACT', 'support@example.com'); // replaces the WordPress.org support hint in update mails
  *   define('OPENSTREAM_AUTO_UPDATE_TEAM', 'Example Agency');       // replaces "The WordPress Team" signature
  *   define('OPENSTREAM_AUTO_UPDATE_GREETING', 'Guten Tag Frau Muster'); // replaces "Howdy!" at the start of update mails
@@ -456,9 +457,32 @@ function openstream_auto_update_email(): string
     return defined('OPENSTREAM_AUTO_UPDATE_EMAIL') ? trim((string) OPENSTREAM_AUTO_UPDATE_EMAIL) : '';
 }
 
+/** false = the site admin address no longer receives the update mails (only EMAIL/NOTIFY). */
+function openstream_auto_update_notify_admin(): bool
+{
+    return !defined('OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN') || OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN;
+}
+
+/** Without the admin and without EMAIL/NOTIFY nobody is left: do not send at all. */
+function openstream_auto_update_has_recipients(): bool
+{
+    return openstream_auto_update_notify_admin()
+        || is_email(openstream_auto_update_email())
+        || (defined('OPENSTREAM_AUTO_UPDATE_NOTIFY') && array_filter(array_map('trim', explode(',', (string) OPENSTREAM_AUTO_UPDATE_NOTIFY)), 'is_email') !== []);
+}
+
+foreach (['auto_core_update_send_email', 'auto_plugin_update_send_email', 'auto_theme_update_send_email'] as $openstream_hook) {
+    add_filter($openstream_hook, static function ($send) {
+        return $send && openstream_auto_update_has_recipients();
+    }, 99);
+}
+
 foreach (['auto_core_update_email', 'auto_plugin_theme_update_email', 'automatic_updates_debug_email'] as $openstream_hook) {
     add_filter($openstream_hook, function ($email) {
         $to = is_array($email['to'] ?? null) ? $email['to'] : array_filter(array_map('trim', explode(',', (string) ($email['to'] ?? ''))));
+        if (!openstream_auto_update_notify_admin()) {
+            $to = [];
+        }
         if (is_email(openstream_auto_update_email())) {
             $to[] = openstream_auto_update_email();
         }
@@ -819,6 +843,8 @@ function openstream_auto_update_git_commit($results): void
         return;
     }
 
+    $GLOBALS['openstream_auto_update_commit'] = trim(openstream_auto_update_run($git . ' rev-parse --short HEAD', $code));
+
     $out = openstream_auto_update_run($git . ' push -q origin HEAD 2>&1', $code);
     if ($code !== 0) {
         openstream_auto_update_git_fail('git push failed (the commit exists locally on production)', $out);
@@ -905,6 +931,7 @@ function openstream_auto_update_git_fail(string $what, string $output): void
 {
     $site = home_url();
     error_log('[openstream-auto-updates] ' . $what . ': ' . $output);
+    $GLOBALS['openstream_auto_update_git_error'] = $what;
     $to = openstream_auto_update_email();
     wp_mail(
         is_email($to) ? $to : (string) get_site_option('admin_email'),
@@ -912,4 +939,130 @@ function openstream_auto_update_git_fail(string $what, string $output): void
         $what . "\n\nSite: " . $site . "\nDirectory: " . ABSPATH . "\n\nOutput:\n" . $output
             . "\n\nPlease commit/push manually on the server or resolve the conflict."
     );
+}
+
+// ---------------------------------------------------------------------------
+// Update log
+//
+// Every auto-update run that changed something appends one entry per component to the
+// site option openstream_auto_update_log (not autoloaded, entries older than 400 days are
+// dropped) – the basis for a monthly report without sending mails to the client.
+// Read it with: wp option get openstream_auto_update_log --format=json
+// ---------------------------------------------------------------------------
+
+add_action('wp_maybe_auto_update', 'openstream_auto_update_log_snapshot', 1);
+add_action('automatic_updates_complete', 'openstream_auto_update_log_write', 25);
+
+/** Installed versions before the run, so the log can show "from → to". */
+function openstream_auto_update_log_snapshot(): void
+{
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    $plugins = [];
+    foreach (get_plugins() as $file => $data) {
+        $plugins[$file] = (string) ($data['Version'] ?? '');
+    }
+    $themes = [];
+    foreach (wp_get_themes() as $slug => $theme) {
+        $themes[$slug] = (string) $theme->get('Version');
+    }
+    $GLOBALS['openstream_auto_update_before'] = [
+        'core' => (string) get_bloginfo('version'),
+        'plugin' => $plugins,
+        'theme' => $themes,
+    ];
+    unset($GLOBALS['openstream_auto_update_commit'], $GLOBALS['openstream_auto_update_git_error']);
+}
+
+/**
+ * @param array $results ['core' => [...], 'plugin' => [...], 'theme' => [...], 'translation' => [...]]
+ */
+function openstream_auto_update_log_write($results): void
+{
+    if (!is_array($results)) {
+        return;
+    }
+    $before = $GLOBALS['openstream_auto_update_before'] ?? ['core' => '', 'plugin' => [], 'theme' => []];
+    $time = gmdate('c');
+    $run = [
+        'time' => $time,
+        'followup' => get_site_option('openstream_auto_update_followup') === 'running',
+        'commit' => $GLOBALS['openstream_auto_update_commit'] ?? null,
+        'git_error' => $GLOBALS['openstream_auto_update_git_error'] ?? null,
+    ];
+    $entries = [];
+    $languages = [];
+    $translationErrors = 0;
+    foreach ($results as $type => $items) {
+        foreach ((array) $items as $r) {
+            if (!is_object($r) || !isset($r->item)) {
+                continue;
+            }
+            $res = $r->result ?? null;
+            $ok = $res && !is_wp_error($res);
+            $item = $r->item;
+            if ($type === 'translation') {
+                if ($ok) {
+                    $languages[(string) ($item->language ?? '')] = true;
+                } else {
+                    $translationErrors++;
+                }
+                continue;
+            }
+            if ($type === 'core') {
+                $slug = 'wordpress';
+                $from = (string) $before['core'];
+                $to = (string) ($item->current ?? $item->version ?? '');
+            } elseif ($type === 'plugin') {
+                $file = (string) ($item->plugin ?? '');
+                $slug = (string) ($item->slug ?? dirname($file));
+                $from = (string) ($before['plugin'][$file] ?? '');
+                $to = (string) ($item->new_version ?? '');
+            } else {
+                $slug = (string) ($item->theme ?? $item->slug ?? '');
+                $from = (string) ($before['theme'][$slug] ?? '');
+                $to = (string) ($item->new_version ?? '');
+            }
+            $entry = [
+                'type' => (string) $type,
+                'slug' => $slug,
+                'name' => wp_strip_all_tags((string) ($r->name ?? $slug)),
+                'from' => $from,
+                'to' => $to,
+                'result' => $ok ? 'updated' : 'failed',
+            ];
+            if (!$ok) {
+                $entry['error'] = is_wp_error($res) ? $res->get_error_code() . ': ' . $res->get_error_message() : 'unknown';
+            }
+            $entries[] = $run + $entry;
+        }
+    }
+    $languages = array_filter(array_keys($languages), 'strlen');
+    if ($languages !== [] || $translationErrors > 0) {
+        $entries[] = $run + [
+            'type' => 'translation',
+            'slug' => implode(',', $languages),
+            'name' => 'Translations',
+            'from' => '',
+            'to' => '',
+            'result' => $translationErrors > 0 ? 'failed' : 'updated',
+        ];
+    }
+    if ($entries === []) {
+        return;
+    }
+    $log = get_site_option('openstream_auto_update_log', []);
+    $log = is_array($log) ? $log : [];
+    $cutoff = gmdate('c', time() - 400 * DAY_IN_SECONDS);
+    $log = array_values(array_filter($log, static function ($e) use ($cutoff): bool {
+        return is_array($e) && (string) ($e['time'] ?? '') >= $cutoff;
+    }));
+    $log = array_merge($log, $entries);
+    // Not autoloaded: the log is only read for reports.
+    if (is_multisite()) {
+        update_site_option('openstream_auto_update_log', $log);
+    } elseif (!update_option('openstream_auto_update_log', $log, false)) {
+        add_option('openstream_auto_update_log', $log, '', false);
+    }
 }
