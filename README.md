@@ -126,6 +126,21 @@ If plugins or themes were updated, **one** more run follows two minutes later wi
 cleared update caches. This picks up updates that are only offered after the first one –
 e.g. bundled plugins matching a new theme version, or WooCommerce extensions.
 
+### Pause
+
+While a major update is done by hand, automatic runs would get in the way (and commit
+from production in between). Pause them for a while:
+
+```bash
+wp option update openstream_auto_update_pause '{"until": 1793700000, "by": "nick", "reason": "PROJ-123 WooCommerce 10"}' --format=json
+wp option delete openstream_auto_update_pause   # resume early
+```
+
+`until` is a Unix timestamp; after it the pause ends by itself (the option is removed on
+the next check). `by` and `reason` are optional and only for whoever looks at the site.
+While paused, WordPress runs no automatic updates at all – core, plugins, themes and
+translations.
+
 ### Cache flush
 
 After every run that changed something, the object cache and common page caches are

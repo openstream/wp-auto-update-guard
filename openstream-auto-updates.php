@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.16.0
+ * Version:     1.17.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -78,6 +78,31 @@ add_filter('automatic_updates_is_vcs_checkout', '__return_false', 1);
 
 // Override AUTOMATIC_UPDATER_DISABLED from wp-config.php (the filter takes precedence).
 add_filter('automatic_updater_disabled', '__return_false', 99);
+
+// Pause, e.g. while a major update is done by hand: no automatic run (and no follow-up run)
+// until the time in the site option openstream_auto_update_pause has passed. Expires by
+// itself, so a forgotten pause cannot switch auto-updates off for good.
+add_filter('automatic_updater_disabled', function ($disabled) {
+    return openstream_auto_update_paused() !== null ? true : $disabled;
+}, 100);
+
+/**
+ * Active pause or null. Option: ['until' => Unix time, 'by' => who, 'reason' => why].
+ *
+ * @return array{until:int, by?:string, reason?:string}|null
+ */
+function openstream_auto_update_paused(): ?array
+{
+    $pause = get_site_option('openstream_auto_update_pause');
+    if ($pause === false) {
+        return null;
+    }
+    if (!is_array($pause) || (int) ($pause['until'] ?? 0) <= time()) {
+        delete_site_option('openstream_auto_update_pause');
+        return null;
+    }
+    return $pause;
+}
 
 // DISALLOW_FILE_MODS (common on Git-managed sites) also blocks the automatic updater.
 // Allow only that context – installing/editing in the admin stays locked.
