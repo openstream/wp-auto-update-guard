@@ -21,12 +21,91 @@ that is likely to break a site.
 
 ## Installation
 
-Copy `openstream-auto-updates.php` to `wp-content/mu-plugins/` – that's it.
+The short version: copy `openstream-auto-updates.php` to `wp-content/mu-plugins/`. On a site
+whose install directory is a Git repository, follow the steps below – the plugin commits
+everything that is not ignored, so the working tree must be clean before it starts.
 
 The plugin is only active when `wp_get_environment_type()` is `production` (the WordPress
 default if `WP_ENVIRONMENT_TYPE` is not set) and the site does not run in DDEV
 (`IS_DDEV_PROJECT` or a `*.ddev.site` host). Local and staging copies stay untouched
 without any configuration.
+
+### 1. Check the site (read-only)
+
+In the WordPress install directory on production:
+
+```bash
+wp core version; php -v | head -1        # WordPress 5.6+ and PHP 7.4+ required
+git status --short | head -20             # must be empty
+git fetch -q && git status -sb | head -1  # must not be behind origin
+git remote -v                             # the server must be able to push here
+wp config get WP_ENVIRONMENT_TYPE 2>/dev/null || echo "not set = production"
+crontab -l 2>/dev/null | grep -i cron     # real cron job for WP-Cron?
+```
+
+Go on only if WordPress is 5.6 or newer, the working tree is clean and the branch is not
+behind `origin` (otherwise `git pull --ff-only` first). On WordPress below 5.5 the plugin
+causes a fatal error. Also check:
+
+- Hosting tools that update on their own (e.g. Plesk WP Toolkit) – detach the site there.
+- Staging copies that share the branch – set `WP_ENVIRONMENT_TYPE` to `'staging'` there.
+
+### 2. Configure `wp-config.php`
+
+Back up the file **outside** the document root (a backup inside it would be untracked and
+end up in the next automatic commit), then add the constants you need (see
+[Configuration](#configuration)):
+
+```bash
+cp wp-config.php ~/wp-config.backup-$(date +%Y%m%d).php
+wp config set OPENSTREAM_AUTO_UPDATE_TICKET 'PROJ-123'      # only for Git sites
+wp config set OPENSTREAM_AUTO_UPDATE_EMAIL 'ops@example.com'
+wp config set OPENSTREAM_AUTO_UPDATE_CONTACT 'support@example.com'
+wp config set OPENSTREAM_AUTO_UPDATE_TEAM 'Example Agency'
+wp config set OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN false --raw  # no mails to the site admin
+wp config set OPENSTREAM_DASHBOARD_TOKEN '<token>'           # only with a risk API
+```
+
+Keep tokens out of chats, tickets and shell histories you share.
+
+### 3. Install the plugin and commit it
+
+```bash
+mkdir -p wp-content/mu-plugins
+curl -fsSL https://raw.githubusercontent.com/openstream/wp-auto-update-guard/main/openstream-auto-updates.php \
+  -o wp-content/mu-plugins/openstream-auto-updates.php
+git add wp-content/mu-plugins/openstream-auto-updates.php
+git commit -m "PROJ-123: Add Openstream Auto-Update Guard" -- wp-content/mu-plugins/openstream-auto-updates.php
+git push origin HEAD
+```
+
+Commit only the plugin file; anything else lying around belongs to someone else.
+
+### 4. Verify
+
+```bash
+wp eval 'var_dump(has_filter("automatic_updates_is_vcs_checkout"));'  # int(...) = active
+curl -s -o /dev/null -w "%{http_code}\n" https://example.com/          # 200
+```
+
+A short 503 is normal: the request can fire WP-Cron and with it a real update run
+(WordPress shows the maintenance page while updating). After the first run (WordPress
+checks twice a day) the Git log shows a commit `PROJ-123: Automatic updates: …`; if
+committing fails, a mail goes to `OPENSTREAM_AUTO_UPDATE_EMAIL`.
+
+### Without shell access
+
+Upload `openstream-auto-updates.php` to `wp-content/mu-plugins/` via SFTP or the hosting
+file manager and add the constants to `wp-config.php` by hand, leaving out
+`OPENSTREAM_AUTO_UPDATE_TICKET`. This is only suitable for sites **without** Git: on a Git
+site, updates would either never reach the repository or the first automatic commit would
+pick up unchecked changes.
+
+### With a coding agent
+
+An AI coding agent with SSH access can do all of the above. Have it run step 1 read-only
+and report back, and give the go for steps 2–4 only after reading that report. Without
+SSH access for the agent, run the commands yourself and paste the output back to it.
 
 ## What it does
 
