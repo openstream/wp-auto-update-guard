@@ -54,16 +54,25 @@ causes a fatal error. Also check:
 
 Back up the file **outside** the document root (a backup inside it would be untracked and
 end up in the next automatic commit), then add the constants you need (see
-[Configuration](#configuration)):
+[Configuration](#configuration)). This is the setup openstream uses on its client sites,
+here for alam-alkutub.ch (Jira ticket ALAM-96):
 
 ```bash
 cp wp-config.php ~/wp-config.backup-$(date +%Y%m%d).php
-wp config set OPENSTREAM_AUTO_UPDATE_TICKET 'PROJ-123'      # only for Git sites
-wp config set OPENSTREAM_AUTO_UPDATE_EMAIL 'ops@example.com'
-wp config set OPENSTREAM_AUTO_UPDATE_CONTACT 'support@example.com'
-wp config set OPENSTREAM_AUTO_UPDATE_TEAM 'Example Agency'
-wp config set OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN false --raw  # no mails to the site admin
-wp config set OPENSTREAM_DASHBOARD_TOKEN '<token>'           # only with a risk API
+wp config set OPENSTREAM_AUTO_UPDATE_TICKET 'ALAM-96'          # open update ticket, only for Git sites
+wp config set OPENSTREAM_AUTO_UPDATE_EMAIL 'info@openstream.ch'  # always info@openstream.ch
+wp config set OPENSTREAM_AUTO_UPDATE_CONTACT 'contact@openstream.ch'
+wp config set OPENSTREAM_AUTO_UPDATE_TEAM 'Openstream'
+wp config set OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN false --raw    # no mails to the client
+wp config set OPENSTREAM_DASHBOARD_TOKEN '<token>'              # issued per site by the update dashboard
+```
+
+Optional, per site:
+
+```bash
+wp config set OPENSTREAM_AUTO_UPDATE_MAX_RISK 'low'              # euronatur-shop.com: only low-risk updates
+wp config set OPENSTREAM_AUTO_UPDATE_EXCLUDE 'w3-total-cache'    # never update these slugs automatically
+wp config set OPENSTREAM_AUTO_UPDATE_GOODLAYERS true --raw       # koerpersprache-training.ch: GoodLayers theme plugins
 ```
 
 Keep tokens out of chats, tickets and shell histories you share.
@@ -75,7 +84,7 @@ mkdir -p wp-content/mu-plugins
 curl -fsSL https://raw.githubusercontent.com/openstream/wp-auto-update-guard/main/openstream-auto-updates.php \
   -o wp-content/mu-plugins/openstream-auto-updates.php
 git add wp-content/mu-plugins/openstream-auto-updates.php
-git commit -m "PROJ-123: Add Openstream Auto-Update Guard" -- wp-content/mu-plugins/openstream-auto-updates.php
+git commit -m "ALAM-96: Add Openstream Auto-Update Guard" -- wp-content/mu-plugins/openstream-auto-updates.php
 git push origin HEAD
 ```
 
@@ -85,12 +94,12 @@ Commit only the plugin file; anything else lying around belongs to someone else.
 
 ```bash
 wp eval 'var_dump(has_filter("automatic_updates_is_vcs_checkout"));'  # int(...) = active
-curl -s -o /dev/null -w "%{http_code}\n" https://example.com/          # 200
+curl -s -o /dev/null -w "%{http_code}\n" https://alam-alkutub.ch/      # 200
 ```
 
 A short 503 is normal: the request can fire WP-Cron and with it a real update run
 (WordPress shows the maintenance page while updating). After the first run (WordPress
-checks twice a day) the Git log shows a commit `PROJ-123: Automatic updates: …`; if
+checks twice a day) the Git log shows a commit `ALAM-96: Automatic updates: …`; if
 committing fails, a mail goes to `OPENSTREAM_AUTO_UPDATE_EMAIL`.
 
 ### Without shell access
