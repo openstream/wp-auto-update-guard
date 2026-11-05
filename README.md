@@ -54,8 +54,7 @@ causes a fatal error. Also check:
 
 Back up the file **outside** the document root (a backup inside it would be untracked and
 end up in the next automatic commit), then add the constants you need (see
-[Configuration](#configuration)). This is the setup openstream uses on its client sites,
-here for alam-alkutub.ch:
+[Configuration](#configuration)). This is the setup openstream uses on its client sites:
 
 ```bash
 cp wp-config.php ~/wp-config.backup-$(date +%Y%m%d).php
