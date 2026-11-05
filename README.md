@@ -61,7 +61,8 @@ cp wp-config.php ~/wp-config.backup-$(date +%Y%m%d).php
 wp config set OPENSTREAM_AUTO_UPDATE_TICKET 'JIRATICKET-ID'    # open Jira update ticket, only for Git sites
 wp config set OPENSTREAM_AUTO_UPDATE_EMAIL 'info@openstream.ch'  # always info@openstream.ch
 wp config set OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN false --raw    # no mails to the client
-wp config set OPENSTREAM_DASHBOARD_TOKEN '<token>'              # issued per site by the update dashboard
+# OPENSTREAM_DASHBOARD_TOKEN: openstream sets it from the update dashboard
+# ("Token einrichten" button), which writes it into wp-config directly.
 ```
 
 Clients get no update mails; they receive a monthly report built from the
