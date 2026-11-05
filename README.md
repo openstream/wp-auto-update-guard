@@ -61,11 +61,14 @@ here for alam-alkutub.ch (Jira ticket ALAM-96):
 cp wp-config.php ~/wp-config.backup-$(date +%Y%m%d).php
 wp config set OPENSTREAM_AUTO_UPDATE_TICKET 'ALAM-96'          # open update ticket, only for Git sites
 wp config set OPENSTREAM_AUTO_UPDATE_EMAIL 'info@openstream.ch'  # always info@openstream.ch
-wp config set OPENSTREAM_AUTO_UPDATE_CONTACT 'contact@openstream.ch'
-wp config set OPENSTREAM_AUTO_UPDATE_TEAM 'Openstream'
 wp config set OPENSTREAM_AUTO_UPDATE_NOTIFY_ADMIN false --raw    # no mails to the client
 wp config set OPENSTREAM_DASHBOARD_TOKEN '<token>'              # issued per site by the update dashboard
 ```
+
+Clients get no update mails; they receive a monthly report built from the
+[update log](#update-log) instead. That is also why `OPENSTREAM_AUTO_UPDATE_CONTACT`,
+`…_TEAM`, `…_GREETING` and `…_FORMAL` are not set: they only change the wording of mails
+the client never sees.
 
 Optional, per site:
 
