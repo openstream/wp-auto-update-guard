@@ -239,6 +239,11 @@ flushed (W3 Total Cache, WP Rocket, LiteSpeed, WP Super Cache, WP Fastest Cache,
 Autoptimize, SiteGround, Breeze, Hummingbird). Otherwise a page cache may keep serving
 HTML that references files of the old version.
 
+On a multisite the updater runs on the main site only, while page caches such as
+Hummingbird and WP Rocket purge the current site only. The page caches are therefore
+flushed on every site of the network (`switch_to_blog`), for Hummingbird with the site's
+own host.
+
 ### Update mails
 
 WordPress' own update mails stay as they are, with these optional additions:
@@ -333,6 +338,7 @@ Read it for reports with
 
 ```bash
 wp option get openstream_auto_update_log --format=json
+wp site option get openstream_auto_update_log --format=json   # multisite
 ```
 
 ### PHP error log

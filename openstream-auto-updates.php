@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.17.0
+ * Version:     1.18.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -796,6 +796,33 @@ function openstream_auto_update_flush_caches($results): void
         try { $fn(); $done[] = $label; } catch (Throwable $e) { error_log('[openstream-auto-updates] Cache ' . $label . ': ' . $e->getMessage()); }
     };
     $try('object cache', static function () { wp_cache_flush(); });
+    if (!is_multisite()) {
+        openstream_auto_update_flush_page_caches($try);
+        error_log('[openstream-auto-updates] caches flushed: ' . implode(', ', $done));
+        return;
+    }
+
+    // Multisite: the updater runs on the main site only, but page caches such as Hummingbird
+    // and WP Rocket purge the current site only. So flush on every site of the network.
+    // Hummingbird takes the host from HTTP_HOST (the main site in cron), not from the site.
+    $host = static function () { return (string) wp_parse_url(home_url(), PHP_URL_HOST); };
+    add_filter('wphb_page_cache_http_host', $host, 99);
+    $sites = get_sites([
+        'fields' => 'ids', 'number' => 0, 'network_id' => get_current_network_id(),
+        'archived' => 0, 'deleted' => 0, 'spam' => 0,
+    ]);
+    foreach ($sites as $id) {
+        switch_to_blog((int) $id);
+        openstream_auto_update_flush_page_caches($try);
+        restore_current_blog();
+    }
+    remove_filter('wphb_page_cache_http_host', $host, 99);
+    error_log('[openstream-auto-updates] caches flushed on ' . count($sites) . ' sites: ' . implode(', ', array_unique($done)));
+}
+
+/** Page caches of the current site. */
+function openstream_auto_update_flush_page_caches(callable $try): void
+{
     if (function_exists('w3tc_flush_all')) { $try('W3 Total Cache', static function () { w3tc_flush_all(); }); }
     if (function_exists('rocket_clean_domain')) { $try('WP Rocket', static function () { rocket_clean_domain(); }); }
     if (has_action('litespeed_purge_all') || defined('LSCWP_V')) { $try('LiteSpeed', static function () { do_action('litespeed_purge_all'); }); }
@@ -805,7 +832,6 @@ function openstream_auto_update_flush_caches($results): void
     if (function_exists('sg_cachepress_purge_cache')) { $try('SiteGround', static function () { sg_cachepress_purge_cache(); }); }
     if (has_action('breeze_clear_all_cache')) { $try('Breeze', static function () { do_action('breeze_clear_all_cache'); }); }
     if (has_action('wphb_clear_page_cache')) { $try('Hummingbird', static function () { do_action('wphb_clear_page_cache'); }); }
-    error_log('[openstream-auto-updates] caches flushed: ' . implode(', ', $done));
 }
 
 // ---------------------------------------------------------------------------
@@ -973,6 +999,7 @@ function openstream_auto_update_git_fail(string $what, string $output): void
 // site option openstream_auto_update_log (not autoloaded, entries older than 400 days are
 // dropped) – the basis for a monthly report without sending mails to the client.
 // Read it with: wp option get openstream_auto_update_log --format=json
+// (multisite: wp site option get openstream_auto_update_log --format=json)
 // ---------------------------------------------------------------------------
 
 add_action('wp_maybe_auto_update', 'openstream_auto_update_log_snapshot', 1);
