@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
- * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.18.0
+ * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
+ * Version:     1.19.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -124,6 +124,9 @@ add_filter('auto_update_plugin', function ($update, $item) {
         return false;
     }
     $file = isset($item->plugin) ? (string) $item->plugin : '';
+    if (openstream_auto_update_rolled_back('plugin', dirname($file), (string) ($item->new_version ?? ''))) {
+        return false; // this version broke the site before and was rolled back
+    }
     if (!function_exists('get_plugins')) {
         require_once ABSPATH . 'wp-admin/includes/plugin.php';
     }
@@ -143,6 +146,9 @@ add_filter('auto_update_theme', function ($update, $item) {
     $slug = isset($item->theme) ? (string) $item->theme : '';
     if (openstream_auto_update_excluded($slug)) {
         return false;
+    }
+    if (openstream_auto_update_rolled_back('theme', $slug, (string) ($item->new_version ?? ''))) {
+        return false; // this version broke the site before and was rolled back
     }
     if ($slug !== '' && !in_array($slug, [get_stylesheet(), get_template()], true)) {
         return true; // inactive theme (neither active nor parent of the active one)
@@ -723,6 +729,275 @@ function openstream_auto_update_plugin_mail_after_core($results): void
 }
 
 // ---------------------------------------------------------------------------
+// Version dependencies between plugins
+//
+// WPML add-ons (String Translation, WooCommerce Multilingual, ACFML, Media …) declare in
+// wpml-dependencies.json which WPML core version they need. If an add-on is updated while
+// the core is held back (e.g. by its update risk), the add-on does not boot and WPML throws
+// a fatal error on every AJAX request – seen in practice: checkout broken for days while
+// the home page, and with it WordPress' own fatal error check, kept working.
+// Same idea for WooCommerce extensions with "WC requires at least".
+// Checked after the download, before the installed version is removed: if a requirement
+// is not met, the update is aborted and the installed version stays. A later run (e.g. the
+// follow-up run after the core update) installs it.
+// ---------------------------------------------------------------------------
+
+add_filter('upgrader_source_selection', 'openstream_auto_update_check_dependencies', 20, 4);
+
+function openstream_auto_update_check_dependencies($source, $remote_source = '', $upgrader = null, $hook_extra = [])
+{
+    if (is_wp_error($source) || empty($hook_extra['plugin'])
+        || !class_exists('Automatic_Upgrader_Skin') || !(($upgrader->skin ?? null) instanceof Automatic_Upgrader_Skin)) {
+        return $source; // manual updates stay the admin's decision
+    }
+    $unmet = openstream_auto_update_unmet_dependencies(trailingslashit((string) $source), (string) $hook_extra['plugin']);
+    if ($unmet === []) {
+        return $source;
+    }
+    $message = sprintf('%s needs %s', dirname((string) $hook_extra['plugin']), implode(', ', $unmet));
+    error_log('[openstream-auto-updates] plugin ' . $message . ' – update held back, installed version stays');
+    return new WP_Error('openstream_dependency_unmet', $message);
+}
+
+/**
+ * Requirements of the new package that the installed plugins do not meet.
+ *
+ * @return string[] e.g. "sitepress-multilingual-cms >= 5.4.0 (installed 5.3.0)"
+ */
+function openstream_auto_update_unmet_dependencies(string $package, string $file): array
+{
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    $installed = [];
+    foreach (get_plugins() as $f => $data) {
+        $installed[dirname($f)] = (string) ($data['Version'] ?? '');
+    }
+
+    $required = [];
+    if (is_file($package . 'wpml-dependencies.json')) {
+        $json = json_decode((string) file_get_contents($package . 'wpml-dependencies.json'), true);
+        foreach (is_array($json) ? $json : [] as $slug => $version) {
+            $required[(string) $slug] = (string) $version;
+        }
+    }
+    $main = $package . basename($file);
+    if (dirname($file) !== 'woocommerce' && is_file($main)) {
+        $wc = (string) (get_file_data($main, ['wc' => 'WC requires at least'])['wc'] ?? '');
+        if ($wc !== '') {
+            $required['woocommerce'] = $wc;
+        }
+    }
+
+    $unmet = [];
+    foreach ($required as $slug => $version) {
+        // Only installed dependencies count: a missing one is reported by WordPress itself.
+        if (isset($installed[$slug]) && $version !== '' && version_compare($installed[$slug], $version, '<')) {
+            $unmet[] = sprintf('%s >= %s (installed %s)', $slug, $version, $installed[$slug]);
+        }
+    }
+    return $unmet;
+}
+
+// ---------------------------------------------------------------------------
+// Check the site after the run and roll back
+//
+// WordPress' own fatal error check after a plugin update only loads the home page. An
+// update that breaks admin-ajax.php or the WooCommerce AJAX endpoints (cart, checkout)
+// slips through. After every run that changed something, this requests the home page,
+// admin-ajax.php and – with WooCommerce – wc-ajax. If one of them answers with HTTP 5xx,
+// the plugins and themes of this run are restored from the updater's backups (they exist
+// until the end of the request), the rolled-back versions are not installed automatically
+// again, and a mail goes to OPENSTREAM_AUTO_UPDATE_EMAIL (or the admin address).
+// Core updates cannot be rolled back – the mail says so.
+// ---------------------------------------------------------------------------
+
+add_action('automatic_updates_complete', 'openstream_auto_update_check_site', 15);
+
+/**
+ * @param array $results ['core' => [...], 'plugin' => [...], 'theme' => [...], 'translation' => [...]]
+ */
+function openstream_auto_update_check_site($results): void
+{
+    if (!is_array($results)) {
+        return;
+    }
+    $items = [];
+    $core = false;
+    foreach (['core', 'plugin', 'theme'] as $type) {
+        foreach ((array) ($results[$type] ?? []) as $r) {
+            $res = is_object($r) ? ($r->result ?? null) : null;
+            if (!$res || is_wp_error($res) || !isset($r->item)) {
+                continue;
+            }
+            if ($type === 'core') {
+                $core = true;
+                continue;
+            }
+            $slug = $type === 'plugin' ? dirname((string) ($r->item->plugin ?? '')) : (string) ($r->item->theme ?? '');
+            if ($slug !== '' && $slug !== '.') {
+                $items[] = ['type' => $type, 'slug' => $slug, 'version' => (string) ($r->item->new_version ?? ''),
+                    'name' => wp_strip_all_tags((string) ($r->name ?? $slug))];
+            }
+        }
+    }
+    if ($items === [] && !$core) {
+        return;
+    }
+
+    sleep(2); // same as WordPress: give the loopback a moment to load the new code
+    $failed = openstream_auto_update_probe();
+    if ($failed !== []) {
+        sleep(10); // a single 5xx under load is no reason to roll back – ask again
+        $failed = openstream_auto_update_probe();
+    }
+    if ($failed === []) {
+        return;
+    }
+    error_log('[openstream-auto-updates] site check after the run failed: ' . implode('; ', $failed));
+
+    $restored = $items !== [] ? openstream_auto_update_restore($items) : [];
+    $after = [];
+    if ($restored !== []) {
+        $remember = (array) get_site_option('openstream_auto_update_rolled_back', []);
+        foreach ($restored as $i) {
+            $remember[$i['type'] . ':' . $i['slug']] = $i['version'];
+            $GLOBALS['openstream_auto_update_rolled_back_now'][$i['type'] . ':' . $i['slug']] = true;
+        }
+        update_site_option('openstream_auto_update_rolled_back', $remember);
+        openstream_auto_update_flush_caches($results);
+        sleep(2);
+        $after = openstream_auto_update_probe();
+    }
+
+    $site = home_url();
+    $lines = ['The site check after the automatic updates failed:', '- ' . implode("\n- ", $failed), ''];
+    $lines[] = $restored !== []
+        ? "Rolled back (these versions are not installed automatically again):\n- "
+            . implode("\n- ", array_map(static function ($i) { return $i['name'] . ' ' . $i['version']; }, $restored))
+        : 'Nothing could be rolled back.';
+    if (count($restored) < count($items)) {
+        $lines[] = "Not rolled back (no backup):\n- " . implode("\n- ", array_map(static function ($i) {
+            return $i['name'] . ' ' . $i['version'];
+        }, array_udiff($items, $restored, static function ($a, $b) {
+            return strcmp($a['type'] . $a['slug'], $b['type'] . $b['slug']);
+        })));
+    }
+    if ($core) {
+        $lines[] = 'WordPress core was updated in the same run and cannot be rolled back.';
+    }
+    $lines[] = '';
+    $lines[] = $restored === [] ? 'The site is probably still broken – please check it now.'
+        : ($after === [] ? 'After the rollback the site check passes again.'
+            : "After the rollback the site check STILL fails – please check the site now:\n- " . implode("\n- ", $after));
+    $to = openstream_auto_update_email();
+    wp_mail(
+        is_email($to) ? $to : (string) get_site_option('admin_email'),
+        '[' . wp_parse_url($site, PHP_URL_HOST) . '] Auto-update ' . ($restored !== [] && $after === [] ? 'rolled back' : 'broke the site'),
+        implode("\n", $lines) . "\n\nSite: " . $site
+    );
+}
+
+/**
+ * Loopback requests to the endpoints that must keep working. POST bypasses page caches.
+ *
+ * @return string[] failed checks, e.g. "admin-ajax.php: HTTP 500"; [] = all fine or not testable
+ */
+function openstream_auto_update_probe(): array
+{
+    $bust = 'openstream_check=' . time();
+    $checks = [
+        'home page' => ['GET', add_query_arg('openstream_check', time(), home_url('/'))],
+        'admin-ajax.php' => ['POST', admin_url('admin-ajax.php') . '?' . $bust],
+    ];
+    if (class_exists('WooCommerce')) {
+        $checks['wc-ajax'] = ['POST', add_query_arg(['wc-ajax' => 'get_refreshed_fragments', 'openstream_check' => time()], home_url('/'))];
+    }
+    $failed = [];
+    foreach ($checks as $label => [$method, $url]) {
+        $res = wp_remote_request($url, [
+            'method' => $method,
+            'timeout' => 30,
+            'redirection' => 3,
+            'headers' => ['Cache-Control' => 'no-cache'],
+            'body' => $method === 'POST' ? ['action' => 'openstream_check'] : null,
+            /** This filter is documented in wp-includes/class-wp-http-streams.php */
+            'sslverify' => apply_filters('https_local_ssl_verify', false),
+        ]);
+        // No answer at all (loopback blocked, timeout) proves nothing – only a 5xx counts.
+        $code = is_wp_error($res) ? 0 : (int) wp_remote_retrieve_response_code($res);
+        if ($code >= 500) {
+            $failed[] = $label . ': HTTP ' . $code;
+        } elseif ($code === 0) {
+            error_log('[openstream-auto-updates] site check ' . $label . ' not possible: ' . $res->get_error_message());
+        }
+    }
+    return $failed;
+}
+
+/**
+ * Restore plugins/themes from the updater's backups (wp-content/upgrade-temp-backup).
+ *
+ * @param array<int, array{type:string, slug:string, version:string, name:string}> $items
+ * @return array<int, array{type:string, slug:string, version:string, name:string}> restored items
+ */
+function openstream_auto_update_restore(array $items): array
+{
+    require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+    if (!method_exists('WP_Upgrader', 'restore_temp_backup') || !WP_Filesystem()) {
+        return [];
+    }
+    $upgrader = new WP_Upgrader(new Automatic_Upgrader_Skin());
+    $upgrader->init();
+    $restored = [];
+    foreach ($items as $i) {
+        $dir = $i['type'] === 'plugin' ? 'plugins' : 'themes';
+        if (!is_dir(WP_CONTENT_DIR . '/upgrade-temp-backup/' . $dir . '/' . $i['slug'])) {
+            continue;
+        }
+        $backup = [['dir' => $dir, 'slug' => $i['slug'], 'src' => $i['type'] === 'plugin' ? WP_PLUGIN_DIR : get_theme_root($i['slug'])]];
+        $result = $upgrader->restore_temp_backup($backup);
+        if ($result === true) {
+            $restored[] = $i;
+        } else {
+            error_log('[openstream-auto-updates] rollback of ' . $i['slug'] . ' failed'
+                . (is_wp_error($result) ? ': ' . $result->get_error_message() : ''));
+        }
+    }
+    if ($restored !== [] && function_exists('wp_opcache_invalidate_directory')) {
+        foreach ($restored as $i) {
+            wp_opcache_invalidate_directory(($i['type'] === 'plugin' ? WP_PLUGIN_DIR : get_theme_root($i['slug'])) . '/' . $i['slug']);
+        }
+    }
+    return $restored;
+}
+
+/** Was this plugin/theme rolled back by the site check of the current run? */
+function openstream_auto_update_rolled_back_now(string $type, $item): bool
+{
+    $slug = $type === 'plugin' ? dirname((string) ($item->plugin ?? '')) : (string) ($item->theme ?? '');
+    return isset($GLOBALS['openstream_auto_update_rolled_back_now'][$type . ':' . $slug]);
+}
+
+/** Was exactly this version rolled back before? Then it is not installed automatically. */
+function openstream_auto_update_rolled_back(string $type, string $slug, string $version): bool
+{
+    $list = (array) get_site_option('openstream_auto_update_rolled_back', []);
+    return $version !== '' && ($list[$type . ':' . $slug] ?? null) === $version;
+}
+
+// WordPress mails the "your site has a technical problem" notice (recovery mode) to the
+// admin address only – often the client, who does not know what to do with it.
+add_filter('recovery_mode_email', function ($email) {
+    $copy = openstream_auto_update_email();
+    if (is_array($email) && is_email($copy) && strpos((string) ($email['to'] ?? ''), $copy) === false) {
+        $email['to'] = trim((string) ($email['to'] ?? '') . ',' . $copy, ',');
+    }
+    return $email;
+});
+
+// ---------------------------------------------------------------------------
 // Follow-up run for dependent updates
 //
 // If plugins/themes were updated, ONE more run follows 2 minutes later with freshly
@@ -932,7 +1207,7 @@ function openstream_auto_update_summary(array $results): array
         foreach ((array) $items as $r) {
             // Success = neither error nor empty (core returns the version number, not true).
             $res = is_object($r) ? ($r->result ?? null) : null;
-            if (!$res || is_wp_error($res) || !isset($r->item)) {
+            if (!$res || is_wp_error($res) || !isset($r->item) || openstream_auto_update_rolled_back_now((string) $type, $r->item)) {
                 continue;
             }
             $item = $r->item;
@@ -1024,7 +1299,8 @@ function openstream_auto_update_log_snapshot(): void
         'plugin' => $plugins,
         'theme' => $themes,
     ];
-    unset($GLOBALS['openstream_auto_update_commit'], $GLOBALS['openstream_auto_update_git_error']);
+    unset($GLOBALS['openstream_auto_update_commit'], $GLOBALS['openstream_auto_update_git_error'],
+        $GLOBALS['openstream_auto_update_rolled_back_now']);
 }
 
 /**
@@ -1052,8 +1328,11 @@ function openstream_auto_update_log_write($results): void
                 continue;
             }
             $res = $r->result ?? null;
-            $ok = $res && !is_wp_error($res);
             $item = $r->item;
+            if ($res && !is_wp_error($res) && openstream_auto_update_rolled_back_now((string) $type, $item)) {
+                $res = new WP_Error('openstream_rolled_back', 'Site check failed after the update, previous version restored');
+            }
+            $ok = $res && !is_wp_error($res);
             if ($type === 'translation') {
                 if ($ok) {
                     $languages[(string) ($item->language ?? '')] = true;

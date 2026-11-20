@@ -211,6 +211,39 @@ the API is unreachable, the cautious rule applies. openstream runs its own scori
 (release distance, changelog signals, "Tested up to", theme coupling); any service that
 speaks this format will do.
 
+### Plugins wait for the version they depend on
+
+WPML add-ons (String Translation, WooCommerce Multilingual, ACFML, Media Translation …)
+declare in `wpml-dependencies.json` which WPML core version they need. If an add-on is
+updated while the core is held back – e.g. because the core update has a higher risk – the
+add-on does not boot and WPML throws a fatal error on every AJAX request. The home page
+keeps working, so WordPress' own fatal error check does not notice; cart and checkout are
+broken. This happened on a shop for three and a half days.
+
+So after the download, before the installed version is removed, the new package is
+checked: if its `wpml-dependencies.json` or its `WC requires at least` header asks for a
+newer version than the one installed, the update is aborted (logged as failed with
+`openstream_dependency_unmet`) and the installed version stays. Once the dependency has
+been updated – in the same run, the follow-up run or later – the add-on goes through.
+Manual updates in the admin are not affected.
+
+### Site check and rollback
+
+After every run that changed something, the home page, `admin-ajax.php` and – with
+WooCommerce – `wc-ajax` are requested (POST, past page caches). If one answers with HTTP
+5xx twice in a row, the plugins and themes of this run are restored from the updater's
+own backups (`wp-content/upgrade-temp-backup`, they exist until the end of the run), the
+caches are flushed again and a mail goes to `OPENSTREAM_AUTO_UPDATE_EMAIL` (or the admin
+address) saying what was rolled back and whether the site works again. The rolled-back
+versions are remembered in the site option `openstream_auto_update_rolled_back` and not
+installed automatically again; the next release is tried as usual. Rolled-back components
+are logged as failed (`openstream_rolled_back`) and left out of the Git commit. Core
+updates cannot be rolled back – the mail says so. No answer at all (loopback blocked,
+timeout) proves nothing and does not trigger a rollback.
+
+WordPress' "your site has a technical problem" mail (recovery mode) goes to the admin
+address only. With `OPENSTREAM_AUTO_UPDATE_EMAIL` set, it goes there too.
+
 ### Follow-up run
 
 If plugins or themes were updated, **one** more run follows two minutes later with
@@ -343,7 +376,8 @@ wp site option get openstream_auto_update_log --format=json   # multisite
 
 ### PHP error log
 
-Held-back updates, risk API problems, cache flushes and Git errors are written to the PHP
+Held-back updates, unmet dependencies, failed site checks and rollbacks, risk API problems,
+cache flushes and Git errors are written to the PHP
 error log with the prefix `[openstream-auto-updates]`.
 
 ## Notes
