@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.19.0
+ * Version:     1.20.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -1053,9 +1053,39 @@ function openstream_auto_update_prepare_followup(): void
 //
 // Otherwise a page cache keeps serving HTML that references files of the old version
 // (seen in practice: a cookie banner script returned 404 until the page cache was flushed).
+// Runs with translations only keep the page caches: no file references change, and on most
+// sites such runs come almost daily – each flush left the page cache cold, so every visitor
+// (and every scraper) hit PHP until it filled up again. LiteSpeed Cache purges on its own
+// after every upgrade ("Purge All On Upgrade"), so its hooks are skipped for these runs too.
 // ---------------------------------------------------------------------------
 
 add_action('automatic_updates_complete', 'openstream_auto_update_flush_caches', 5);
+add_action('upgrader_process_complete', 'openstream_auto_update_keep_litespeed_translations', 5, 2);
+
+/** True if the run changed translations only (failed updates changed nothing). */
+function openstream_auto_update_only_translations($results): bool
+{
+    foreach (['core', 'plugin', 'theme'] as $t) {
+        foreach ((array) ($results[$t] ?? []) as $r) {
+            if (is_object($r) && !empty($r->result) && !is_wp_error($r->result)) {
+                return false;
+            }
+        }
+    }
+    return !empty($results['translation']);
+}
+
+/**
+ * LiteSpeed purges on upgrader_process_complete for language packs too. Translations come
+ * last in an automatic run, so the hook stays removed for the rest of the request.
+ */
+function openstream_auto_update_keep_litespeed_translations($upgrader, $hook_extra = []): void
+{
+    if (($hook_extra['type'] ?? '') === 'translation'
+        && is_object($upgrader) && isset($upgrader->skin) && $upgrader->skin instanceof Automatic_Upgrader_Skin) {
+        remove_action('upgrader_process_complete', 'LiteSpeed\Purge::purge_all');
+    }
+}
 
 function openstream_auto_update_flush_caches($results): void
 {
@@ -1071,6 +1101,11 @@ function openstream_auto_update_flush_caches($results): void
         try { $fn(); $done[] = $label; } catch (Throwable $e) { error_log('[openstream-auto-updates] Cache ' . $label . ': ' . $e->getMessage()); }
     };
     $try('object cache', static function () { wp_cache_flush(); });
+    if (openstream_auto_update_only_translations($results)) {
+        remove_action('automatic_updates_complete', 'LiteSpeed\Purge::purge_all');
+        error_log('[openstream-auto-updates] translations only, page caches kept: ' . implode(', ', $done));
+        return;
+    }
     if (!is_multisite()) {
         openstream_auto_update_flush_page_caches($try);
         error_log('[openstream-auto-updates] caches flushed: ' . implode(', ', $done));

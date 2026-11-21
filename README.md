@@ -272,6 +272,13 @@ flushed (W3 Total Cache, WP Rocket, LiteSpeed, WP Super Cache, WP Fastest Cache,
 Autoptimize, SiteGround, Breeze, Hummingbird). Otherwise a page cache may keep serving
 HTML that references files of the old version.
 
+Runs with translations only flush the object cache but keep the page caches. No file
+references change, and on many sites such runs come almost daily: each flush left the page
+cache cold, so visitors and scrapers hit PHP until it had filled up again. LiteSpeed Cache
+purges on its own after every upgrade ("Purge All On Upgrade"); its hooks are skipped for
+these runs as well. Changed strings show up once a page is cached anew (at the latest after
+the cache TTL).
+
 On a multisite the updater runs on the main site only, while page caches such as
 Hummingbird and WP Rocket purge the current site only. The page caches are therefore
 flushed on every site of the network (`switch_to_blog`), for Hummingbird with the site's
