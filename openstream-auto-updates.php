@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on, themes and their paid add-ons only move together; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.21.0
+ * Version:     1.22.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -26,6 +26,7 @@
  *   define('OPENSTREAM_DASHBOARD_TOKEN', '…');                     // token for the risk API
  *   define('OPENSTREAM_AUTO_UPDATE_MAX_RISK', 'medium');           // highest risk installed automatically: low|medium
  *   define('OPENSTREAM_AUTO_UPDATE_GOODLAYERS', 'goodlayers-core,goodlayers-core-portfolio'); // GoodLayers theme plugins as regular updates (true = all)
+ *   define('OPENSTREAM_AUTO_UPDATE_TGMPA', 'goya-core,js_composer,revslider'); // plugins bundled with the theme (TGMPA) as regular updates (true = all)
  */
 
 defined('ABSPATH') || exit;
@@ -195,6 +196,12 @@ function openstream_auto_update_theme_addons(): array
     if (openstream_auto_update_goodlayers_plugins() !== []) {
         $map[get_template()] = ['goodlayers-core/goodlayers-core.php'];
     }
+    // Plugins the theme bundles via TGMPA and marks as required (e.g. goya-core).
+    foreach (openstream_auto_update_tgmpa_plugins() as $p) {
+        if ($p['required'] && $p['file'] !== '') {
+            $map[get_template()] = array_values(array_unique(array_merge($map[get_template()] ?? [], [$p['file']])));
+        }
+    }
     return (array) apply_filters('openstream_auto_update_theme_addons', $map);
 }
 
@@ -330,6 +337,115 @@ add_filter('pre_set_site_transient_update_plugins', function ($transient) {
     }
     return $transient;
 });
+
+// ---------------------------------------------------------------------------
+// TGMPA: plugins a theme bundles in its own package
+//
+// ThemeForest themes (Goya …) ship their core plugin, WPBakery, Slider Revolution etc.
+// in the theme package and offer them on their TGMPA page "Install Plugins" only, which
+// loads in the admin. Envato Market delivers the theme itself, not these plugins (they
+// are licensed through the theme), and the plugins' own updaters announce versions they
+// cannot download without a separate license. With OPENSTREAM_AUTO_UPDATE_TGMPA the
+// version the installed theme ships is announced as a regular plugin update, with the
+// theme's download source. After a theme update the follow-up run picks up the plugins
+// of the new theme version.
+// ---------------------------------------------------------------------------
+
+/**
+ * Plugin slugs to take from the theme: comma list, or true for every installed plugin
+ * the theme bundles.
+ *
+ * @return string[]|true
+ */
+function openstream_auto_update_tgmpa_wanted()
+{
+    if (!defined('OPENSTREAM_AUTO_UPDATE_TGMPA') || !OPENSTREAM_AUTO_UPDATE_TGMPA) {
+        return [];
+    }
+    if (OPENSTREAM_AUTO_UPDATE_TGMPA === true) {
+        return true;
+    }
+    return array_values(array_filter(array_map('trim', explode(',', (string) OPENSTREAM_AUTO_UPDATE_TGMPA))));
+}
+
+/**
+ * Wanted plugins the active theme bundles (not the ones it takes from wordpress.org).
+ * TGMPA registers them on init in the admin only; elsewhere the theme's registration
+ * is run here.
+ *
+ * @return array<string, array{file: string, version: string, package: string, required: bool}> slug => data
+ */
+function openstream_auto_update_tgmpa_plugins(): array
+{
+    $wanted = openstream_auto_update_tgmpa_wanted();
+    if ($wanted === [] || !class_exists('TGM_Plugin_Activation') || !did_action('init')) {
+        return [];
+    }
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    $tgmpa = TGM_Plugin_Activation::get_instance();
+    if (empty($tgmpa->plugins) && !did_action('tgmpa_register')) {
+        do_action('tgmpa_register');
+    }
+    $installed = get_plugins();
+    $out = [];
+    foreach ((array) $tgmpa->plugins as $slug => $p) {
+        $slug = (string) $slug;
+        if (!in_array($p['source_type'] ?? '', ['external', 'bundled'], true) || (string) ($p['version'] ?? '') === ''
+            || ($wanted !== true && !in_array($slug, $wanted, true))) {
+            continue;
+        }
+        $file = (string) ($p['file_path'] ?? '');
+        $out[$slug] = [
+            'file' => isset($installed[$file]) ? $file : '',
+            'version' => (string) $p['version'],
+            'package' => (string) $tgmpa->get_download_url($slug),
+            'required' => !empty($p['required']),
+        ];
+    }
+    return $out;
+}
+
+// After the plugins' own updaters (WPBakery 10, Envato Market 5).
+add_filter('pre_set_site_transient_update_plugins', function ($transient) {
+    if (!is_object($transient)) {
+        return $transient;
+    }
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    $installed = get_plugins();
+    foreach (openstream_auto_update_tgmpa_plugins() as $slug => $p) {
+        $file = $p['file'];
+        if ($file === '' || $p['package'] === '') {
+            continue; // not installed, or the theme names no source
+        }
+        $own = $transient->response[$file] ?? $transient->no_update[$file] ?? null;
+        if (is_object($own) && strpos((string) ($own->id ?? ''), 'w.org/') === 0) {
+            continue; // also on wordpress.org (e.g. wc-ajax-product-filter): WordPress delivers it
+        }
+        $item = (object) [
+            'id' => 'tgmpa/' . get_template() . '/' . $slug,
+            'slug' => $slug,
+            'plugin' => $file,
+            'new_version' => $p['version'],
+            'url' => '',
+            'package' => $p['package'],
+        ];
+        // Listed in no_update as well, otherwise WordPress shows no auto-update toggle. This
+        // replaces the plugin's own announcement: whether it can download it needs a
+        // license only checked at download time (WPBakery: package = true).
+        if (version_compare($p['version'], (string) $installed[$file]['Version'], '>')) {
+            $transient->response[$file] = $item;
+            unset($transient->no_update[$file]);
+        } else {
+            $transient->no_update[$file] = $item;
+            unset($transient->response[$file]);
+        }
+    }
+    return $transient;
+}, 20);
 
 /**
  * Reason why another member of the theme's family cannot be updated in this run

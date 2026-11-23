@@ -76,6 +76,7 @@ Optional, per site:
 wp config set OPENSTREAM_AUTO_UPDATE_MAX_RISK 'low'              # euronatur-shop.com: only low-risk updates
 wp config set OPENSTREAM_AUTO_UPDATE_EXCLUDE 'w3-total-cache'    # never update these slugs automatically
 wp config set OPENSTREAM_AUTO_UPDATE_GOODLAYERS true --raw       # koerpersprache-training.ch: GoodLayers theme plugins
+wp config set OPENSTREAM_AUTO_UPDATE_TGMPA true --raw            # petalane.ch: plugins bundled with the Goya theme
 ```
 
 Keep tokens out of chats, tickets and shell histories you share.
@@ -189,6 +190,33 @@ registration nothing changes.
 define('OPENSTREAM_AUTO_UPDATE_GOODLAYERS', 'goodlayers-core,goodlayers-core-portfolio');
 // or every GoodLayers plugin installed on the site:
 define('OPENSTREAM_AUTO_UPDATE_GOODLAYERS', true);
+```
+
+### Plugins bundled with the theme (TGMPA)
+
+ThemeForest themes such as Goya ship their own core plugin, WPBakery, Slider Revolution
+etc. in the theme package and offer them on their "Install Plugins" page (TGM Plugin
+Activation), which loads in the admin only. Envato Market delivers the theme itself, but
+not these plugins: they are licensed through the theme, not bought with the Envato
+account. Their own updaters meanwhile announce versions they cannot download without a
+separate license (WPBakery 9.2 "available", no package).
+
+`OPENSTREAM_AUTO_UPDATE_TGMPA` announces the version the installed theme ships as a
+regular plugin update, with the theme's own download source (URL or zip in the theme).
+It replaces what the plugin's own updater announces: whether that can be downloaded
+depends on a license checked only at download time (WPBakery sets `package` to `true`).
+With an own license for newer versions, leave the slug out of the list. Plugins the
+theme also takes from wordpress.org (e.g. wc-ajax-product-filter) stay with WordPress.
+Plugins the theme marks as required (Goya Core) form a family with the theme, see above.
+
+The theme names its plugin versions only once it is installed, so a theme update goes
+first and the [follow-up run](#follow-up-run) two minutes later brings the plugins of the
+new theme version – the same order as by hand.
+
+```php
+define('OPENSTREAM_AUTO_UPDATE_TGMPA', 'goya-core,js_composer,revslider');
+// or every plugin the theme bundles that is installed on the site:
+define('OPENSTREAM_AUTO_UPDATE_TGMPA', true);
 ```
 
 ### Update risk
@@ -350,6 +378,7 @@ All constants are optional and go into `wp-config.php`:
 | `OPENSTREAM_AUTO_UPDATE_FORMAL` | as translated | German mails: `true` = "Sie", `false` = "du" |
 | `OPENSTREAM_AUTO_UPDATE_MAX_RISK` | `medium` | Highest risk level installed automatically: `low` or `medium` |
 | `OPENSTREAM_AUTO_UPDATE_GOODLAYERS` | – | GoodLayers theme plugins as regular updates: comma list of slugs or `true` for all |
+| `OPENSTREAM_AUTO_UPDATE_TGMPA` | – | Plugins bundled with the theme (TGMPA) as regular updates: comma list of slugs or `true` for all |
 | `OPENSTREAM_DASHBOARD_URL` | openstream's service | Base URL of the risk API |
 | `OPENSTREAM_DASHBOARD_TOKEN` | – | Token for the risk API; without it the cautious rule applies |
 | `OPENSTREAM_AUTO_UPDATE_ANY_ENV` | `false` | Also run outside production (testing only) |
