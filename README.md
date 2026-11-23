@@ -145,15 +145,22 @@ For active plugins and the active theme (and its parent), an update only runs if
 2. the slug is not listed in `OPENSTREAM_AUTO_UPDATE_EXCLUDE`, and
 3. the update risk is acceptable (see below).
 
-### Themes wait for their paid add-on
+### Themes and their paid add-ons move together
 
-Some themes come with a paid add-on plugin that must keep pace with the theme (Astra +
-Astra Pro, GeneratePress + GP Premium, Kadence + Kadence Pro). Updating only the theme can
-break things – e.g. Astra 4.14 with Astra Pro 4.5 leaves the Astra settings page empty.
-So a theme update is held back (and logged) while the active add-on has a pending update
-that cannot run in the same pass: no download package (license missing or expired), or
-vetoed by the rules here (toggle off, excluded, other major version, risk). Once the
-add-on can be updated, both go through together.
+Some themes come with paid add-on plugins that must keep pace with the theme (Avada +
+Avada Core + Avada Builder, Astra + Astra Pro, GeneratePress + GP Premium, Kadence +
+Kadence Pro). Updating only one of them can break things – e.g. Astra 4.14 with Astra Pro
+4.5 leaves the Astra settings page empty, and Avada 7.17 once went in with Avada Core while
+Avada Builder stayed on 3.16 because its update risk was higher. So theme and add-ons are
+one family: a member is held back (and logged) while another active member has a pending
+update that cannot run in the same pass: no download package (license missing or
+expired), or vetoed by the rules here (toggle off, excluded, rolled back, other major
+version, risk). Once all of them can be updated, they go through together.
+
+Avada additionally runs in lockstep: theme and plugins share the version after the major
+number (7.17.1 / 5.17.1 / 3.17.1). There a member only moves if all of them end up on the
+same release – also when Avada announces the theme before the plugin updates arrive.
+Further lockstep themes via the filter `openstream_auto_update_lockstep_themes`.
 
 Further pairs can be added with a filter (theme slug => plugin files):
 

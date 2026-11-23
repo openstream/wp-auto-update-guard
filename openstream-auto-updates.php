@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
- * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.20.0
+ * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on, themes and their paid add-ons only move together; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
+ * Version:     1.21.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -139,7 +139,16 @@ add_filter('auto_update_plugin', function ($update, $item) {
     $installed = get_plugins()[$file]['Version'] ?? '';
     $new = (string) ($item->new_version ?? '');
     $decision = openstream_auto_update_decide($update, $installed, $new);
-    return $decision === true ? openstream_auto_update_risk_ok('plugin', $slug, $installed, $new) : $decision;
+    if ($decision !== true || !openstream_auto_update_risk_ok('plugin', $slug, $installed, $new)) {
+        return $decision === true ? false : $decision;
+    }
+    $theme = get_template();
+    if (in_array($file, openstream_auto_update_theme_addons()[$theme] ?? [], true)
+        && ($blocker = openstream_auto_update_family_blocker($theme, $file)) !== '') {
+        error_log(sprintf('[openstream-auto-updates] plugin %s %s -> %s held back: %s', $slug, $installed, $new, $blocker));
+        return false;
+    }
+    return true;
 }, 20, 2);
 
 add_filter('auto_update_theme', function ($update, $item) {
@@ -159,7 +168,7 @@ add_filter('auto_update_theme', function ($update, $item) {
     $installed = (string) wp_get_theme($slug)->get('Version');
     $new = (string) ($item->new_version ?? '');
     $decision = openstream_auto_update_decide($update, $installed, $new);
-    if ($decision === true && ($addon = openstream_auto_update_addon_blocker($slug)) !== '') {
+    if ($decision === true && ($addon = openstream_auto_update_family_blocker($slug, '')) !== '') {
         error_log(sprintf('[openstream-auto-updates] theme %s %s -> %s held back: %s', $slug, $installed, $new, $addon));
         return false;
     }
@@ -168,8 +177,9 @@ add_filter('auto_update_theme', function ($update, $item) {
 
 /**
  * Paid add-on plugins that must keep pace with their theme. Updating the theme alone
- * breaks things (seen with Astra 4.14 + Astra Pro 4.5: empty settings page), so the
- * theme waits until the add-on can be updated in the same run.
+ * breaks things (seen with Astra 4.14 + Astra Pro 4.5: empty settings page; Avada 7.17
+ * went in with Avada Core while Avada Builder stayed on 3.16), so theme and add-ons
+ * are one family: a member is updated only if every pending member can go in the same run.
  * Extend with the filter openstream_auto_update_theme_addons.
  *
  * @return array<string, string[]> theme slug (template) => plugin files
@@ -177,6 +187,7 @@ add_filter('auto_update_theme', function ($update, $item) {
 function openstream_auto_update_theme_addons(): array
 {
     $map = [
+        'Avada' => ['fusion-core/fusion-core.php', 'fusion-builder/fusion-builder.php'],
         'astra' => ['astra-addon/astra-addon.php'],
         'generatepress' => ['gp-premium/gp-premium.php'],
         'kadence' => ['kadence-pro/kadence-pro.php'],
@@ -321,15 +332,36 @@ add_filter('pre_set_site_transient_update_plugins', function ($transient) {
 });
 
 /**
- * Reason why the theme's add-on cannot be updated in this run ('' = nothing blocks):
- * its pending update has no download package (missing/expired license) or is vetoed
- * (WordPress toggle off, excluded, other major version, risk).
+ * Reason why another member of the theme's family cannot be updated in this run
+ * ('' = nothing blocks): its pending update has no download package (missing/expired
+ * license) or is vetoed (WordPress toggle off, excluded, rolled back, other major
+ * version, risk). $skip = the member asking: '' for the theme, else its plugin file.
  */
-function openstream_auto_update_addon_blocker(string $theme): string
+function openstream_auto_update_family_blocker(string $theme, string $skip): string
 {
     $files = openstream_auto_update_theme_addons()[$theme] ?? [];
     if ($files === []) {
         return '';
+    }
+    if ($skip !== '') {
+        $pending = get_site_transient('update_themes');
+        $u = is_object($pending) ? ($pending->response[$theme] ?? null) : null;
+        if ($u !== null) {
+            $u = (object) $u; // themes are stored as arrays
+            $current = (string) wp_get_theme($theme)->get('Version');
+            $target = (string) ($u->new_version ?? '');
+            $name = 'theme ' . $theme . ' ' . $current;
+            if (empty($u->package)) {
+                return $name . ' cannot be updated to ' . $target . ' (no download package – license missing?)';
+            }
+            if (!in_array($theme, (array) get_site_option('auto_update_themes', []), true)
+                || openstream_auto_update_excluded($theme)
+                || openstream_auto_update_rolled_back('theme', $theme, $target)
+                || openstream_auto_update_decide(true, $current, $target) !== true
+                || !openstream_auto_update_risk_ok('theme', $theme, $current, $target)) {
+                return $name . ' -> ' . $target . ' is not updated automatically';
+            }
+        }
     }
     if (!function_exists('get_plugins')) {
         require_once ABSPATH . 'wp-admin/includes/plugin.php';
@@ -339,8 +371,8 @@ function openstream_auto_update_addon_blocker(string $theme): string
     $pending = is_object($pending) ? (array) ($pending->response ?? []) : [];
     $toggles = (array) get_site_option('auto_update_plugins', []);
     foreach ($files as $file) {
-        if (!isset($plugins[$file]) || !is_plugin_active($file) || !isset($pending[$file])) {
-            continue; // not in use or nothing pending
+        if ($file === $skip || !isset($plugins[$file]) || !is_plugin_active($file) || !isset($pending[$file])) {
+            continue; // the asking member, not in use or nothing pending
         }
         $u = $pending[$file];
         $name = $plugins[$file]['Name'] . ' ' . $plugins[$file]['Version'];
@@ -351,12 +383,46 @@ function openstream_auto_update_addon_blocker(string $theme): string
             return $name . ' cannot be updated to ' . $target . ' (no download package – license missing?)';
         }
         if (!in_array($file, $toggles, true) || openstream_auto_update_excluded($slug)
+            || openstream_auto_update_rolled_back('plugin', dirname($file), $target)
             || openstream_auto_update_decide(true, $current, $target) !== true
             || !openstream_auto_update_risk_ok('plugin', $slug, $current, $target)) {
             return $name . ' -> ' . $target . ' is not updated automatically';
         }
     }
-    return '';
+    return openstream_auto_update_lockstep_blocker($theme, $files, $plugins, $pending);
+}
+
+/**
+ * Themes whose add-ons share the version after the major number (Avada 7.17.1, Avada
+ * Core 5.17.1, Avada Builder 3.17.1). There the family only moves when all members end
+ * up on the same release – also if the vendor announces the theme before the plugins.
+ * Extend with the filter openstream_auto_update_lockstep_themes.
+ *
+ * @param array<string, array> $plugins get_plugins()
+ * @param array<string, object> $pending pending plugin updates
+ */
+function openstream_auto_update_lockstep_blocker(string $theme, array $files, array $plugins, array $pending): string
+{
+    if (!in_array($theme, (array) apply_filters('openstream_auto_update_lockstep_themes', ['Avada']), true)) {
+        return '';
+    }
+    $themes = get_site_transient('update_themes');
+    $u = is_object($themes) ? ($themes->response[$theme] ?? null) : null;
+    $versions = [$theme => (string) (((array) $u)['new_version'] ?? wp_get_theme($theme)->get('Version'))];
+    foreach ($files as $file) {
+        if (isset($plugins[$file]) && is_plugin_active($file)) {
+            $versions[$plugins[$file]['Name']] = (string) ($pending[$file]->new_version ?? $plugins[$file]['Version']);
+        }
+    }
+    $releases = array_unique(array_map(static function (string $v): string {
+        return (string) preg_replace('/^\d+\./', '', ltrim(trim($v), 'vV'));
+    }, $versions));
+    if (count($releases) <= 1) {
+        return '';
+    }
+    return 'versions would not match (' . implode(', ', array_map(static function ($name, $v) {
+        return $name . ' ' . $v;
+    }, array_keys($versions), $versions)) . ')';
 }
 
 /**
