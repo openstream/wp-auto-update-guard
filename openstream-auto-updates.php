@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on, themes and their paid add-ons only move together; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.22.0
+ * Version:     1.22.1
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -1473,6 +1473,7 @@ function openstream_auto_update_run(string $cmd, &$code): string
 function openstream_auto_update_git_fail(string $what, string $output): void
 {
     $site = home_url();
+    $output = openstream_auto_update_git_output($output);
     error_log('[openstream-auto-updates] ' . $what . ': ' . $output);
     $GLOBALS['openstream_auto_update_git_error'] = $what;
     $to = openstream_auto_update_email();
@@ -1482,6 +1483,44 @@ function openstream_auto_update_git_fail(string $what, string $output): void
         $what . "\n\nSite: " . $site . "\nDirectory: " . ABSPATH . "\n\nOutput:\n" . $output
             . "\n\nPlease commit/push manually on the server or resolve the conflict."
     );
+}
+
+/**
+ * When the Git host answers with an HTML error page (e.g. Bitbucket's 500 page during an
+ * outage), Git relays it line by line as "remote: …" – several KB of CSS and SVG in a
+ * plain-text mail. Collapse it to title + visible text; any other output stays as it is.
+ */
+function openstream_auto_update_git_output(string $output): string
+{
+    if (stripos($output, '<html') === false) {
+        return $output;
+    }
+    $html = [];
+    $other = [];
+    foreach (explode("\n", $output) as $line) {
+        if (preg_match('/^remote:\s?(.*)$/', $line, $m)) {
+            $html[] = $m[1];
+        } else {
+            $other[] = $line;
+        }
+    }
+    $doc = implode("\n", $html);
+    $title = preg_match('~<title[^>]*>(.*?)</title>~is', $doc, $m) ? $m[1] : '';
+    $body = preg_replace('~<(head|svg|style|script)\b.*?</\1>~is', ' ', $doc) ?? $doc;
+    $clean = static function (string $s): string {
+        $s = html_entity_decode(wp_strip_all_tags($s), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        return trim((string) preg_replace('/\s+/u', ' ', $s));
+    };
+    $text = $clean($body);
+    if (function_exists('mb_strimwidth')) {
+        $text = mb_strimwidth($text, 0, 500, '…');
+    }
+    $title = $clean($title);
+    $summary = 'remote: [HTML error page from the Git host, shortened] '
+        . ($title !== '' && stripos($text, $title) === false ? $title . ' – ' : '') . $text
+        . "\n(An HTML error page usually means an outage at the Git host: check its status page"
+        . ' and retry later. The next run with updates pushes this commit as well.)';
+    return $summary . "\n" . implode("\n", $other);
 }
 
 // ---------------------------------------------------------------------------
