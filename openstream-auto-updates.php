@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on, themes and their paid add-ons only move together; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.23.0
+ * Version:     1.24.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -27,6 +27,7 @@
  *   define('OPENSTREAM_AUTO_UPDATE_MAX_RISK', 'medium');           // highest risk installed automatically: low|medium
  *   define('OPENSTREAM_AUTO_UPDATE_GOODLAYERS', 'goodlayers-core,goodlayers-core-portfolio'); // GoodLayers theme plugins as regular updates (true = all)
  *   define('OPENSTREAM_AUTO_UPDATE_TGMPA', 'goya-core,js_composer,revslider'); // plugins bundled with the theme (TGMPA) as regular updates (true = all)
+ *   define('OPENSTREAM_AUTO_UPDATE_UNBLOCK', 'wp-rocket');         // plugins that switch off their own auto-updates: the toggle decides again
  */
 
 defined('ABSPATH') || exit;
@@ -118,6 +119,31 @@ add_filter('allow_major_auto_core_updates', '__return_false', 99);
 add_filter('allow_dev_auto_core_updates', '__return_false', 99);
 
 add_filter('auto_update_translation', '__return_true');
+
+// Plugins that switch off their own auto-updates (WP Rocket returns false for itself at
+// priority 10): with OPENSTREAM_AUTO_UPDATE_UNBLOCK the WordPress toggle decides again, and
+// the rules below apply as for any other plugin (major version, risk, site check).
+add_filter('auto_update_plugin', static function ($update) {
+    $GLOBALS['openstream_auto_update_toggle'] = $update;
+    return $update;
+}, PHP_INT_MIN);
+add_filter('auto_update_plugin', static function ($update, $item) {
+    $slug = isset($item->slug) ? (string) $item->slug : '';
+    $dir = isset($item->plugin) ? dirname((string) $item->plugin) : '';
+    $unblock = openstream_auto_update_unblocked();
+    if (array_key_exists('openstream_auto_update_toggle', $GLOBALS) && (in_array($slug, $unblock, true) || in_array($dir, $unblock, true))) {
+        return $GLOBALS['openstream_auto_update_toggle'];
+    }
+    return $update;
+}, 19, 2);
+
+/** @return string[] plugin slugs whose own "no auto-updates" filter is overruled */
+function openstream_auto_update_unblocked(): array
+{
+    return defined('OPENSTREAM_AUTO_UPDATE_UNBLOCK')
+        ? array_values(array_filter(array_map('trim', explode(',', (string) OPENSTREAM_AUTO_UPDATE_UNBLOCK)), 'strlen'))
+        : [];
+}
 
 add_filter('auto_update_plugin', function ($update, $item) {
     $slug = isset($item->slug) ? (string) $item->slug : '';

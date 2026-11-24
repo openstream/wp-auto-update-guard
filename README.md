@@ -130,6 +130,7 @@ SSH access for the agent, run the commands yourself and paste the output back to
 | `AUTOMATIC_UPDATER_DISABLED` | `automatic_updater_disabled` → `false` |
 | `DISALLOW_FILE_MODS` | allowed **only** in the `automatic_updater` context – installing or editing in the admin stays locked |
 | `WP_AUTO_UPDATE_CORE` | overridden: minor yes, major/dev no |
+| A plugin switching off its own auto-updates (WP Rocket: `auto_update_plugin` → `false` for itself) | only with `OPENSTREAM_AUTO_UPDATE_UNBLOCK` (e.g. `'wp-rocket'`): the WordPress toggle decides again, then the same rules as for any other plugin apply (major version, risk, site check). WP Rocket's changelog is read by the risk API |
 
 ### Respects the WordPress toggles
 
@@ -391,6 +392,7 @@ All constants are optional and go into `wp-config.php`:
 | `OPENSTREAM_AUTO_UPDATE_MAX_RISK` | `medium` | Highest risk level installed automatically: `low` or `medium` |
 | `OPENSTREAM_AUTO_UPDATE_GOODLAYERS` | – | GoodLayers theme plugins as regular updates: comma list of slugs or `true` for all |
 | `OPENSTREAM_AUTO_UPDATE_TGMPA` | – | Plugins bundled with the theme (TGMPA) as regular updates: comma list of slugs or `true` for all |
+| `OPENSTREAM_AUTO_UPDATE_UNBLOCK` | – | Comma list of plugin slugs whose own "no auto-updates" filter is overruled (e.g. `wp-rocket`) |
 | `OPENSTREAM_DASHBOARD_URL` | openstream's service | Base URL of the risk API |
 | `OPENSTREAM_DASHBOARD_TOKEN` | – | Token for the risk API; without it the cautious rule applies |
 | `OPENSTREAM_AUTO_UPDATE_ANY_ENV` | `false` | Also run outside production (testing only) |
