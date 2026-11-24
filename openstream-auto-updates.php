@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on, themes and their paid add-ons only move together; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.22.1
+ * Version:     1.23.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -1231,6 +1231,134 @@ function openstream_auto_update_prepare_followup(): void
 }
 
 // ---------------------------------------------------------------------------
+// Warning when a run broke off
+//
+// A run that gets killed (web server time limit on wp-cron.php, out of memory) never
+// reaches automatic_updates_complete: the updates may be installed, but there is no site
+// check, no commit, no update log, no update mail and no cache flush. Each run leaves a
+// marker that it removes at its end; if the next run still finds one, a mail goes to
+// OPENSTREAM_AUTO_UPDATE_EMAIL. Nothing is committed for the broken run on purpose: its
+// state may be half-finished, someone should look at it first.
+// ---------------------------------------------------------------------------
+
+add_action('wp_maybe_auto_update', 'openstream_auto_update_run_start', -10);
+add_action('wp_maybe_auto_update', 'openstream_auto_update_run_end', PHP_INT_MAX);
+
+function openstream_auto_update_run_start(): void
+{
+    $marker = get_site_option('openstream_auto_update_running');
+    // Younger than WordPress' own update lock (1 hour): another run is still going,
+    // WordPress ends this one right away.
+    if (is_array($marker) && (int) ($marker['time'] ?? 0) > time() - HOUR_IN_SECONDS) {
+        return;
+    }
+    if (is_array($marker)) {
+        openstream_auto_update_broken_run_mail($marker);
+    }
+    update_site_option('openstream_auto_update_running', ['time' => time()] + openstream_auto_update_versions());
+    $GLOBALS['openstream_auto_update_run_owner'] = true;
+    // Keep a fatal error for the mail of the next run. WordPress' fatal error handler is an
+    // earlier shutdown function and ends with wp_die(), so later shutdown functions never
+    // run: record it from its message filter, the own shutdown function covers the case
+    // without that handler (WP_DISABLE_FATAL_ERROR_HANDLER).
+    add_filter('wp_php_error_args', static function ($args, $error) {
+        openstream_auto_update_record_fatal(is_array($error) ? $error : null);
+        return $args;
+    }, 10, 2);
+    register_shutdown_function(static function (): void {
+        openstream_auto_update_record_fatal(error_get_last());
+    });
+}
+
+function openstream_auto_update_record_fatal(?array $e): void
+{
+    if (empty($GLOBALS['openstream_auto_update_run_owner']) || !$e
+        || !in_array($e['type'] ?? 0, [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR], true)) {
+        return;
+    }
+    $marker = get_site_option('openstream_auto_update_running');
+    if (is_array($marker) && empty($marker['error'])) {
+        $marker['error'] = $e['message'] . ' in ' . $e['file'] . ':' . $e['line'];
+        update_site_option('openstream_auto_update_running', $marker);
+    }
+}
+
+function openstream_auto_update_run_end(): void
+{
+    if (!empty($GLOBALS['openstream_auto_update_run_owner'])) {
+        delete_site_option('openstream_auto_update_running');
+        unset($GLOBALS['openstream_auto_update_run_owner']);
+    }
+}
+
+/** @param array $marker ['time' => int, 'core' => string, 'plugin' => [...], 'theme' => [...], 'error' => ?string] */
+function openstream_auto_update_broken_run_mail(array $marker): void
+{
+    $site = home_url();
+    $now = openstream_auto_update_versions();
+    $changes = [];
+    if ((string) ($marker['core'] ?? '') !== $now['core']) {
+        $changes[] = 'WordPress ' . ($marker['core'] ?? '?') . ' -> ' . $now['core'];
+    }
+    foreach (['plugin', 'theme'] as $type) {
+        foreach ($now[$type] as $key => $version) {
+            $old = (string) (($marker[$type] ?? [])[$key] ?? '');
+            if ($old !== $version) {
+                $changes[] = ($type === 'plugin' ? dirname((string) $key) : $key) . ' ' . ($old !== '' ? $old : 'new') . ' -> ' . $version;
+            }
+        }
+    }
+
+    $root = untrailingslashit(ABSPATH);
+    $git = '';
+    if (is_dir($root . '/.git') && function_exists('exec')) {
+        $out = openstream_auto_update_run('cd ' . escapeshellarg($root) . ' && ' . openstream_auto_update_git_env() . ' git status --porcelain 2>&1', $code);
+        $count = $code === 0 ? count(array_filter(explode("\n", $out), 'strlen')) : null;
+        $git = "\n\nGit: " . ($count === null ? 'status not available' : $count . ' uncommitted change(s)')
+            . ". The next run that updates something commits them along with its own changes;"
+            . " to commit now: cd " . $root . ' && git add -A && git commit && git push';
+    }
+
+    $started = wp_date('d.m.Y H:i', (int) $marker['time']);
+    error_log('[openstream-auto-updates] the run started ' . $started . ' broke off'
+        . (!empty($marker['error']) ? ': ' . $marker['error'] : ''));
+    $to = openstream_auto_update_email();
+    wp_mail(
+        is_email($to) ? $to : (string) get_site_option('admin_email'),
+        '[' . wp_parse_url($site, PHP_URL_HOST) . '] Auto-update run broke off',
+        'The auto-update run started ' . $started . ' never reached its end: no site check or rollback,'
+            . ' no commit, no update log, no update mail and no cache flush for it.'
+            . "\n\nSite: " . $site
+            . "\n\nChanged since the run started:\n" . ($changes !== [] ? '- ' . implode("\n- ", $changes) : '- no plugin, theme or core version (translations may have changed)')
+            . (!empty($marker['error']) ? "\n\nFatal error:\n" . $marker['error'] : '')
+            . $git
+            . "\n\nPlease check the site. A frequent cause is a web server time limit on wp-cron.php:"
+            . ' use a real cron job (DISABLE_WP_CRON plus wp cron event run --due-now).'
+    );
+}
+
+/** Installed core, plugin (by file) and theme versions. */
+function openstream_auto_update_versions(): array
+{
+    if (!function_exists('get_plugins')) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    $plugins = [];
+    foreach (get_plugins() as $file => $data) {
+        $plugins[$file] = (string) ($data['Version'] ?? '');
+    }
+    $themes = [];
+    foreach (wp_get_themes() as $slug => $theme) {
+        $themes[$slug] = (string) $theme->get('Version');
+    }
+    return [
+        'core' => (string) get_bloginfo('version'),
+        'plugin' => $plugins,
+        'theme' => $themes,
+    ];
+}
+
+// ---------------------------------------------------------------------------
 // Flush caches after the run
 //
 // Otherwise a page cache keeps serving HTML that references files of the old version
@@ -1539,22 +1667,7 @@ add_action('automatic_updates_complete', 'openstream_auto_update_log_write', 25)
 /** Installed versions before the run, so the log can show "from → to". */
 function openstream_auto_update_log_snapshot(): void
 {
-    if (!function_exists('get_plugins')) {
-        require_once ABSPATH . 'wp-admin/includes/plugin.php';
-    }
-    $plugins = [];
-    foreach (get_plugins() as $file => $data) {
-        $plugins[$file] = (string) ($data['Version'] ?? '');
-    }
-    $themes = [];
-    foreach (wp_get_themes() as $slug => $theme) {
-        $themes[$slug] = (string) $theme->get('Version');
-    }
-    $GLOBALS['openstream_auto_update_before'] = [
-        'core' => (string) get_bloginfo('version'),
-        'plugin' => $plugins,
-        'theme' => $themes,
-    ];
+    $GLOBALS['openstream_auto_update_before'] = openstream_auto_update_versions();
     unset($GLOBALS['openstream_auto_update_commit'], $GLOBALS['openstream_auto_update_git_error'],
         $GLOBALS['openstream_auto_update_rolled_back_now']);
 }

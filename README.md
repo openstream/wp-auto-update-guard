@@ -285,6 +285,18 @@ If plugins or themes were updated, **one** more run follows two minutes later wi
 cleared update caches. This picks up updates that are only offered after the first one –
 e.g. bundled plugins matching a new theme version, or WooCommerce extensions.
 
+### Warning when a run broke off
+
+A run that gets killed – typically by a web server time limit on `wp-cron.php`, or out of
+memory – never reaches its end: the updates may be installed, but there is no site check,
+no commit, no update log, no update mail and no cache flush. Each run leaves a marker
+(`openstream_auto_update_running`) that it removes at its end. If the next run still finds
+one older than an hour, a mail goes to `OPENSTREAM_AUTO_UPDATE_EMAIL` (or the admin address)
+with the start time, the versions that changed since then, a fatal error if one was
+recorded, and the number of uncommitted files. Nothing is committed for the broken run:
+its state may be half-finished. The next run that updates something commits those
+changes along with its own.
+
 ### Pause
 
 While a major update is done by hand, automatic runs would get in the way (and commit
