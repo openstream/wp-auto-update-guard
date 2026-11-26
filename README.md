@@ -422,7 +422,9 @@ Every run that changed something appends one entry per component to the site opt
  "from": "6.1.1", "to": "6.1.2", "result": "updated"}
 ```
 
-`result` is `updated` or `failed` (then with `error`); `commit` is the commit made by the
+`result` is `updated` or `failed` (then with `error`: `<code>: <message>` from WordPress,
+`messages: …` with what the upgrader reported when WordPress gave no error object, e.g.
+a failed download of a premium package, or `unknown: …` when it reported nothing at all); `commit` is the commit made by the
 run (see above). Translations are summarised in one entry per run (`slug` = languages).
 Read it for reports with
 

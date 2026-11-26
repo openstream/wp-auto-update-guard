@@ -3,7 +3,7 @@
  * Plugin Name: Openstream Auto-Update Guard
  * Plugin URI:  https://github.com/openstream/wp-auto-update-guard
  * Description: Safe WordPress auto-updates: core minor/security releases only, plugins and themes only within the same major version, translations always. Plugins wait for the version they depend on, themes and their paid add-ons only move together; a site check after each run rolls back what broke it. Works in Git checkouts and can commit and push the updates straight from production.
- * Version:     1.24.0
+ * Version:     1.25.0
  * Author:      Openstream Internet Solutions
  * Author URI:  https://www.openstream.ch
  * License:     GPL-2.0-or-later
@@ -1699,6 +1699,69 @@ function openstream_auto_update_log_snapshot(): void
 }
 
 /**
+ * Why an automatic update failed, for the log.
+ *
+ * WordPress does not always hand back a WP_Error: Plugin_Upgrader::upgrade() and
+ * Theme_Upgrader::upgrade() return null when the download or unpacking fails (the
+ * error only goes to the upgrader skin), and false when there is no update to install.
+ * The reason is then in the skin messages ($r->messages), so they are used instead.
+ * Progress lines ("Downloading update from …", "Unpacking the update…") are dropped,
+ * query strings are cut from URLs (license keys of premium update servers).
+ *
+ * @param mixed  $res result of the upgrader
+ * @param object $r   update result from WP_Automatic_Updater
+ */
+function openstream_auto_update_failure_reason($res, $r): string
+{
+    if (is_wp_error($res)) {
+        return openstream_auto_update_redact_urls($res->get_error_code() . ': ' . $res->get_error_message());
+    }
+    $progress = [];
+    foreach ([
+        __('Enabling Maintenance mode&#8230;'),
+        __('Disabling Maintenance mode&#8230;'),
+        __('Downloading update from %s&#8230;'),
+        __('Unpacking the update&#8230;'),
+        __('Installing the latest version&#8230;'),
+        __('Removing the old version of the plugin&#8230;'),
+        __('Removing the old version of the theme&#8230;'),
+        __('Plugin updated successfully.'),
+        __('Theme updated successfully.'),
+        __('Moving the old version to a temporary location&#8230;'),
+    ] as $string) {
+        $string = trim(wp_strip_all_tags(html_entity_decode($string, ENT_QUOTES, 'UTF-8')));
+        $progress[] = '/^' . str_replace('%s', '.*', preg_quote($string, '/')) . '$/su';
+    }
+    $lines = [];
+    foreach ((array) ($r->messages ?? []) as $message) {
+        $message = trim(wp_strip_all_tags(html_entity_decode((string) $message, ENT_QUOTES, 'UTF-8')));
+        if ($message === '') {
+            continue;
+        }
+        foreach ($progress as $pattern) {
+            if (preg_match($pattern, $message)) {
+                continue 2;
+            }
+        }
+        $lines[] = $message;
+    }
+    $lines = array_values(array_unique($lines));
+    if ($lines !== []) {
+        $text = openstream_auto_update_redact_urls(implode(' / ', $lines));
+        return 'messages: ' . (strlen($text) > 500 ? substr($text, 0, 497) . '...' : $text);
+    }
+    return $res === false
+        ? 'unknown: WordPress reported no reason (result false: no update package offered at install time)'
+        : 'unknown: WordPress reported no reason (result null)';
+}
+
+/** Cuts query strings from URLs: premium update servers put license keys there. */
+function openstream_auto_update_redact_urls(string $text): string
+{
+    return (string) preg_replace('~(https?://[^\s?#"\'<>]+)\?[^\s"\'<>]*~i', '$1?…', $text);
+}
+
+/**
  * @param array $results ['core' => [...], 'plugin' => [...], 'theme' => [...], 'translation' => [...]]
  */
 function openstream_auto_update_log_write($results): void
@@ -1759,7 +1822,7 @@ function openstream_auto_update_log_write($results): void
                 'result' => $ok ? 'updated' : 'failed',
             ];
             if (!$ok) {
-                $entry['error'] = is_wp_error($res) ? $res->get_error_code() . ': ' . $res->get_error_message() : 'unknown';
+                $entry['error'] = openstream_auto_update_failure_reason($res, $r);
             }
             $entries[] = $run + $entry;
         }
